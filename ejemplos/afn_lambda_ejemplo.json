@@ -1,0 +1,12 @@
+{
+  "tipo": "AFN-λ",
+  "estados": ["q0", "q1", "q2"],
+  "alfabeto": ["a", "b"],
+  "inicial": "q0",
+  "finales": ["q2"],
+  "transiciones": {
+    "q0": {"a": ["q1"], "λ": ["q2"]},
+    "q1": {"b": ["q2"], "λ": ["q1"]},
+    "q2": {"a": ["q2"]}
+  }
+}
