@@ -16,3 +16,4 @@ htmlcov/
 
 # Agent tooling metadata (not part of the simulator deliverable)
 .atl/
+.atl/skill-registry.md
