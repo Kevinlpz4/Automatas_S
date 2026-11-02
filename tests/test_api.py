@@ -13,9 +13,16 @@ from types import MappingProxyType
 import pytest
 
 from automata.api.catalog import ExampleCatalog, ExampleEntry, ExampleNotFoundError
+from automata.api.schemas import (
+    PasoTraza,
+    ResumenAutomata,
+    ResultadoSimulacion,
+)
 from automata.api.vcodes import V_CODE_MAP, api_codigo, api_error
 from automata.models import validacion
+from automata.models.traza import ReasonCode, SimulationResult, TraceStep
 from automata.models.validacion import ValidationIssue, validate_structure
+from automata.models.vista import AutomatonSummary, TransitionView
 
 PHASE1_CODES = (
     validacion.MISSING_TIPO,
@@ -183,3 +190,201 @@ def test_catalog_read_real_file_exact() -> None:
     )
 
     assert ExampleCatalog().read("afd_ejemplo.json") == expected
+
+
+SUMMARY_KEYS = {
+    "tipo",
+    "estados",
+    "alfabeto",
+    "inicial",
+    "finales",
+    "transiciones",
+}
+TRANSITION_KEYS = {"origen", "simbolo", "destino"}
+RESULT_KEYS = {"palabra", "aceptada", "estado_final", "motivo", "explicacion", "traza"}
+TRACE_STEP_KEYS = {
+    "paso",
+    "origen",
+    "simbolo",
+    "destino",
+    "destino_es_final",
+    "transicion_faltante",
+}
+ENGLISH_KEYS = {
+    "type",
+    "states",
+    "alphabet",
+    "initial",
+    "finals",
+    "transitions",
+    "source",
+    "symbol",
+    "destination",
+    "word",
+    "accepted",
+    "final_state",
+    "reason",
+    "explanation",
+    "trace",
+    "step",
+    "destination_is_final",
+}
+
+
+def test_schema_from_summary_exact_keys() -> None:
+    """from_summary emits exactly the locked Spanish summary keys."""
+    summary = AutomatonSummary(
+        tipo="AFD",
+        estados=("q0", "q1"),
+        alfabeto=("a",),
+        inicial="q0",
+        finales=("q1",),
+        transiciones=(
+            TransitionView("q0", "a", "q1"),
+            TransitionView("q1", "a", "q1"),
+        ),
+    )
+
+    dumped = ResumenAutomata.from_summary(summary).model_dump()
+
+    assert set(dumped) == SUMMARY_KEYS
+    assert set(dumped) & ENGLISH_KEYS == set()
+    assert all(set(item) == TRANSITION_KEYS for item in dumped["transiciones"])
+    assert dumped == {
+        "tipo": "AFD",
+        "estados": ["q0", "q1"],
+        "alfabeto": ["a"],
+        "inicial": "q0",
+        "finales": ["q1"],
+        "transiciones": [
+            {"origen": "q0", "simbolo": "a", "destino": "q1"},
+            {"origen": "q1", "simbolo": "a", "destino": "q1"},
+        ],
+    }
+
+
+def test_schema_from_result_exact_keys() -> None:
+    """from_result emits exact Spanish keys and the serialized reason value."""
+    result = SimulationResult(
+        word="aba",
+        accepted=True,
+        final_state="q1",
+        reason=ReasonCode.ACCEPTED,
+        explanation="La palabra 'aba' es aceptada: terminó en el estado final 'q1'.",
+        trace=(TraceStep(1, "q0", "a", "q1", True),),
+    )
+
+    dumped = ResultadoSimulacion.from_result(result).model_dump()
+
+    assert set(dumped) == RESULT_KEYS
+    assert set(dumped) & ENGLISH_KEYS == set()
+    assert dumped["palabra"] == "aba"
+    assert dumped["aceptada"] is True
+    assert dumped["estado_final"] == "q1"
+    assert dumped["motivo"] == result.reason.value == "accepted"
+    assert dumped["motivo"] != "ReasonCode.ACCEPTED"
+    assert dumped["explicacion"] == result.explanation
+    assert all(set(step) == TRACE_STEP_KEYS for step in dumped["traza"])
+
+
+def test_schema_trace_mapping() -> None:
+    """A normal step keeps its destination; a stopped step nulls it."""
+    result = SimulationResult(
+        word="ca",
+        accepted=False,
+        final_state=None,
+        reason=ReasonCode.REJECTED_MISSING_TRANSITION,
+        explanation="La palabra 'ca' es rechazada: no hay transición.",
+        trace=(
+            TraceStep(1, "q0", "c", "q3", False),
+            TraceStep(2, "q3", "a", None, False),
+        ),
+    )
+
+    steps = ResultadoSimulacion.from_result(result).model_dump()["traza"]
+
+    assert steps[0] == {
+        "paso": 1,
+        "origen": "q0",
+        "simbolo": "c",
+        "destino": "q3",
+        "destino_es_final": False,
+        "transicion_faltante": False,
+    }
+    assert steps[1] == {
+        "paso": 2,
+        "origen": "q3",
+        "simbolo": "a",
+        "destino": None,
+        "destino_es_final": False,
+        "transicion_faltante": True,
+    }
+    assert all(set(step) == TRACE_STEP_KEYS for step in steps)
+
+
+def test_schema_drops_extras() -> None:
+    """Extra and English keys are ignored, never echoed in the payload."""
+    summary = ResumenAutomata.model_validate(
+        {
+            "tipo": "AFD",
+            "estados": ["q0"],
+            "alfabeto": ["a"],
+            "inicial": "q0",
+            "finales": ["q0"],
+            "transiciones": [
+                {
+                    "origen": "q0",
+                    "simbolo": "a",
+                    "destino": "q0",
+                    "source": "q9",
+                    "symbol": "z",
+                    "destination": "q8",
+                }
+            ],
+            "type": "AFN",
+            "states": ["qX"],
+            "alphabet": ["z"],
+            "initial": "qX",
+            "finals": ["qX"],
+            "transitions": [],
+        }
+    )
+
+    dumped = summary.model_dump()
+
+    assert set(dumped) == SUMMARY_KEYS
+    assert set(dumped) & ENGLISH_KEYS == set()
+    assert dumped["tipo"] == "AFD"
+    assert set(dumped["transiciones"][0]) == TRANSITION_KEYS
+    assert dumped["transiciones"][0] == {
+        "origen": "q0",
+        "simbolo": "a",
+        "destino": "q0",
+    }
+
+    step = PasoTraza.model_validate(
+        {
+            "paso": 1,
+            "origen": "q0",
+            "simbolo": "a",
+            "destino": "q0",
+            "destino_es_final": True,
+            "transicion_faltante": False,
+            "step": 99,
+            "source": "q9",
+            "symbol": "z",
+            "destination": "q8",
+            "destination_is_final": False,
+            "extra": "ignored",
+        }
+    )
+
+    assert set(step.model_dump()) == TRACE_STEP_KEYS
+    assert step.model_dump() == {
+        "paso": 1,
+        "origen": "q0",
+        "simbolo": "a",
+        "destino": "q0",
+        "destino_es_final": True,
+        "transicion_faltante": False,
+    }
