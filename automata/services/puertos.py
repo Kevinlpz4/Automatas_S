@@ -30,3 +30,9 @@ class AutomatonInspector(Protocol):
     """Summarize an automaton definition as structured data."""
 
     def summarize(self, automaton: Automaton) -> AutomatonSummary: ...
+
+
+class AutomatonTextLoader(Protocol):
+    """Load an automaton definition from already-decoded JSON text."""
+
+    def load_text(self, text: str) -> Automaton: ...
