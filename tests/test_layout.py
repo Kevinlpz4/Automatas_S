@@ -39,9 +39,8 @@ def _requirement_names(text: str) -> set[str]:
 
 
 def test_requirements_only_pytest():
-    """R22: phase 1 declares pytest only and no web framework."""
+    """R22: phase 1 declared pytest; phase 2 foundations add pydantic only."""
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     names = _requirement_names(requirements)
 
-    assert names == {"pytest"}
-    assert "fastapi" not in names
+    assert names == {"pytest", "pydantic"}

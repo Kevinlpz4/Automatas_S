@@ -6,6 +6,7 @@ Later tasks extend this file with endpoint behavior.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from types import MappingProxyType
@@ -388,3 +389,32 @@ def test_schema_drops_extras() -> None:
         "destino_es_final": True,
         "transicion_faltante": False,
     }
+
+
+def test_schema_json_serialization_uses_spanish_keys() -> None:
+    """The real JSON serialization exposes Spanish keys only, not English ones."""
+    summary = AutomatonSummary(
+        tipo="AFD",
+        estados=("q0", "q1"),
+        alfabeto=("a",),
+        inicial="q0",
+        finales=("q1",),
+        transiciones=(TransitionView("q0", "a", "q1"),),
+    )
+    result = SimulationResult(
+        word="a",
+        accepted=True,
+        final_state="q1",
+        reason=ReasonCode.ACCEPTED,
+        explanation="La palabra 'a' es aceptada.",
+        trace=(TraceStep(1, "q0", "a", "q1", True),),
+    )
+
+    summary_json = json.loads(ResumenAutomata.from_summary(summary).model_dump_json())
+    result_json = json.loads(ResultadoSimulacion.from_result(result).model_dump_json())
+
+    assert set(summary_json) == SUMMARY_KEYS
+    assert set(summary_json["transiciones"][0]) == TRANSITION_KEYS
+    assert set(result_json) == RESULT_KEYS
+    assert set(result_json["traza"][0]) == TRACE_STEP_KEYS
+    assert (set(summary_json) | set(result_json)) & ENGLISH_KEYS == set()
