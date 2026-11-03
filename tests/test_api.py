@@ -12,8 +12,26 @@ from pathlib import Path
 from types import MappingProxyType
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from pydantic import BaseModel
 
 from automata.api.catalog import ExampleCatalog, ExampleEntry, ExampleNotFoundError
+from automata.api.errors import (
+    ERROR_INTERNO,
+    ERROR_INTERNO_MESSAGE,
+    INNER_JSON_INVALIDO_MESSAGE,
+    JSON_INVALIDO,
+    JSON_INVALIDO_MESSAGE,
+    TIPO_NO_SOPORTADO,
+    TIPO_NO_SOPORTADO_MESSAGE,
+    ApiError,
+    InvalidJsonBodyError,
+    UnsupportedTypeError,
+    error_response,
+    internal_error_response,
+    register_exception_handlers,
+)
 from automata.api.schemas import (
     PasoTraza,
     ResumenAutomata,
@@ -418,3 +436,143 @@ def test_schema_json_serialization_uses_spanish_keys() -> None:
     assert set(result_json) == RESULT_KEYS
     assert set(result_json["traza"][0]) == TRACE_STEP_KEYS
     assert (set(summary_json) | set(result_json)) & ENGLISH_KEYS == set()
+
+
+def test_error_response_exact_shape() -> None:
+    """The envelope has exactly ``errores`` and each item exactly two keys."""
+    payload = error_response(
+        [
+            {
+                "codigo": "V13",
+                "mensaje": "El símbolo 'z' no pertenece al alfabeto.",
+                "campo": "alfabeto[0]",
+            }
+        ]
+    )
+
+    assert payload == {
+        "errores": [
+            {
+                "codigo": "V13",
+                "mensaje": "El símbolo 'z' no pertenece al alfabeto.",
+            }
+        ]
+    }
+    assert set(payload) == {"errores"}
+    assert set(payload["errores"][0]) == {"codigo", "mensaje"}
+
+
+def test_api_error_status_and_codes() -> None:
+    """Controlled adapter errors expose stable status codes and Spanish text."""
+    generic = InvalidJsonBodyError()
+    assert isinstance(generic, ApiError)
+    assert generic.status_code == 422
+    assert generic.codigo == JSON_INVALIDO
+    assert generic.mensaje == JSON_INVALIDO_MESSAGE
+    assert generic.payload() == {
+        "errores": [{"codigo": JSON_INVALIDO, "mensaje": JSON_INVALIDO_MESSAGE}]
+    }
+
+    inner = InvalidJsonBodyError(INNER_JSON_INVALIDO_MESSAGE)
+    assert inner.mensaje == "El campo 'automata' no contiene un JSON válido."
+    assert inner.payload()["errores"][0]["mensaje"] == inner.mensaje
+
+    unsupported = UnsupportedTypeError()
+    assert unsupported.status_code == 422
+    assert unsupported.codigo == TIPO_NO_SOPORTADO
+    assert unsupported.mensaje == TIPO_NO_SOPORTADO_MESSAGE
+    assert unsupported.payload() == {
+        "errores": [
+            {
+                "codigo": TIPO_NO_SOPORTADO,
+                "mensaje": "La simulación solo está disponible para AFD.",
+            }
+        ]
+    }
+
+
+def test_internal_error_payload_no_leak() -> None:
+    """The defensive 500 ignores exception details and never leaks internals."""
+    payload = internal_error_response(
+        RuntimeError("secret /home/kevin/app.py Traceback")
+    )
+
+    assert payload == {
+        "errores": [
+            {
+                "codigo": ERROR_INTERNO,
+                "mensaje": ERROR_INTERNO_MESSAGE,
+            }
+        ]
+    }
+    rendered = json.dumps(payload, ensure_ascii=False)
+    for leak in ("RuntimeError", "Traceback", "/home/", "secret", ".py"):
+        assert leak not in rendered
+
+
+class _ProbeBody(BaseModel):
+    value: str
+
+
+def test_request_validation_error_uses_json_invalido_envelope() -> None:
+    """FastAPI's native ``{"detail": ...}`` envelope never reaches the client."""
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    @app.post("/probe")
+    def probe(_body: _ProbeBody) -> dict[str, bool]:
+        return {"ok": True}
+
+    response = TestClient(app).post("/probe", json={})
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "errores": [
+            {
+                "codigo": JSON_INVALIDO,
+                "mensaje": JSON_INVALIDO_MESSAGE,
+            }
+        ]
+    }
+    assert "detail" not in response.json()
+
+
+def test_example_not_found_beats_internal_handler() -> None:
+    """Specific 404 wins over the defensive 500; unhandled errors still map to 500."""
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    @app.get("/missing")
+    def missing() -> None:
+        raise ExampleNotFoundError("README.md")
+
+    @app.get("/boom")
+    def boom() -> None:
+        raise RuntimeError("secret /home/kevin/app.py Traceback")
+
+    client = TestClient(app, raise_server_exceptions=False)
+
+    not_found = client.get("/missing")
+    assert not_found.status_code == 404
+    assert not_found.json() == {
+        "errores": [
+            {
+                "codigo": "EJEMPLO_NO_ENCONTRADO",
+                "mensaje": "No se encontró el ejemplo 'README.md'.",
+            }
+        ]
+    }
+
+    internal = client.get("/boom")
+    assert internal.status_code == 500
+    assert internal.json() == {
+        "errores": [
+            {
+                "codigo": ERROR_INTERNO,
+                "mensaje": ERROR_INTERNO_MESSAGE,
+            }
+        ]
+    }
+    rendered = json.dumps(internal.json(), ensure_ascii=False)
+    for leak in ("RuntimeError", "Traceback", "/home/", "secret", ".py"):
+        assert leak not in rendered
