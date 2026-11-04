@@ -18,6 +18,7 @@ from automata.cli.sesion import ConsoleSession  # noqa: E402
 from automata.services.cargador import JsonAutomatonLoader  # noqa: E402
 from automata.services.inspector import DefinitionInspector  # noqa: E402
 from automata.services.simulador import AFDSimulator  # noqa: E402
+from automata.services.texto import JsonAutomatonTextLoader  # noqa: E402
 
 EJEMPLOS = ROOT / "ejemplos"
 
@@ -70,3 +71,19 @@ def make_session(input_text: str) -> tuple[ConsoleSession, StringIO]:
         stdout=stdout,
     )
     return session, stdout
+
+
+@pytest.fixture
+def text_loader() -> JsonAutomatonTextLoader:
+    """Return the additive raw-text loader used by API tests."""
+    return JsonAutomatonTextLoader()
+
+
+@pytest.fixture
+def client():
+    """Return a lazy TestClient over the production app factory."""
+    from fastapi.testclient import TestClient
+
+    from automata.api.app import create_app
+
+    return TestClient(create_app())

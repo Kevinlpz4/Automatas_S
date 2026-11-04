@@ -47,6 +47,7 @@ from automata.api.schemas import (
 )
 from automata.api.vcodes import V_CODE_MAP, api_codigo, api_error
 from automata.models import validacion
+from automata.models.errores import InvalidAutomatonDefinition, MalformedJsonError
 from automata.models.traza import ReasonCode, SimulationResult, TraceStep
 from automata.models.validacion import ValidationIssue, validate_structure
 from automata.models.vista import AutomatonSummary, TransitionView
@@ -666,3 +667,182 @@ def test_dependency_not_configured_maps_to_internal_error_envelope() -> None:
             {"codigo": ERROR_INTERNO, "mensaje": ERROR_INTERNO_MESSAGE}
         ]
     }
+
+
+def _create_app(**kwargs: object) -> object:
+    """Build the production app lazily so the missing module is a real Red."""
+    from automata.api.app import create_app
+
+    return create_app(**kwargs)
+
+
+def test_create_app_factory() -> None:
+    """The production composition root exists and returns a FastAPI app."""
+    from automata.api.app import app as module_app
+    from automata.api.app import create_app
+
+    app = create_app()
+    assert isinstance(app, FastAPI)
+    assert isinstance(module_app, FastAPI)
+
+
+@pytest.mark.parametrize(
+    "exc_type",
+    [
+        ExampleNotFoundError,
+        ApiError,
+        InvalidAutomatonDefinition,
+        MalformedJsonError,
+        Exception,
+    ],
+)
+def test_create_app_registers_specific_handlers(exc_type: type[BaseException]) -> None:
+    """The real app registers the specific handlers, not only minimal test apps."""
+    app = _create_app()
+    assert exc_type in app.exception_handlers  # type: ignore[attr-defined]
+
+
+def test_create_app_configures_concrete_ports() -> None:
+    """The real app stores concrete ports on app.state for T10+ routes."""
+    app = _create_app()
+    assert type(app.state.text_loader).__name__ == "JsonAutomatonTextLoader"  # type: ignore[attr-defined]
+    assert type(app.state.simulator).__name__ == "AFDSimulator"  # type: ignore[attr-defined]
+    assert type(app.state.inspector).__name__ == "DefinitionInspector"  # type: ignore[attr-defined]
+    assert type(app.state.catalog).__name__ == "ExampleCatalog"  # type: ignore[attr-defined]
+
+
+def test_api_uses_injected_ports() -> None:
+    """Injected sentinels reach routes through the real dependency providers.
+
+    The probe route consumes the same ``get_*`` providers that production
+    routes will use. Sentinel identity fails if a provider constructs a
+    concrete service instead of reading ``app.state``.
+    """
+    loader_sentinel = object()
+    simulator_sentinel = object()
+    inspector_sentinel = object()
+    catalog_sentinel = object()
+
+    app = _create_app(
+        loader=loader_sentinel,
+        simulator=simulator_sentinel,
+        inspector=inspector_sentinel,
+        catalog=catalog_sentinel,
+    )
+
+    assert app.state.text_loader is loader_sentinel  # type: ignore[attr-defined]
+    assert app.state.simulator is simulator_sentinel  # type: ignore[attr-defined]
+    assert app.state.inspector is inspector_sentinel  # type: ignore[attr-defined]
+    assert app.state.catalog is catalog_sentinel  # type: ignore[attr-defined]
+
+    @app.get("/probe")  # type: ignore[attr-defined]
+    def probe(
+        loader: Annotated[object, Depends(get_text_loader)],
+        sim: Annotated[object, Depends(get_simulator)],
+        insp: Annotated[object, Depends(get_inspector)],
+        cat: Annotated[object, Depends(get_catalog)],
+    ) -> dict[str, bool]:
+        return {
+            "text_loader": loader is loader_sentinel,
+            "simulator": sim is simulator_sentinel,
+            "inspector": insp is inspector_sentinel,
+            "catalog": cat is catalog_sentinel,
+        }
+
+    client = TestClient(app)
+    assert client.get("/probe").json() == {
+        "text_loader": True,
+        "simulator": True,
+        "inspector": True,
+        "catalog": True,
+    }
+
+
+def test_catalog_path_is_absolute_and_file_relative(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The default catalog does not depend on the process cwd."""
+    import automata.api.catalog as catalog_module
+
+    app = _create_app()
+    catalog = app.state.catalog  # type: ignore[attr-defined]
+
+    assert isinstance(catalog, ExampleCatalog)
+    assert catalog._directory == catalog_module.EXAMPLES_DIR
+    assert catalog._directory.is_absolute()
+    assert catalog._directory == (
+        Path(catalog_module.__file__).resolve().parents[2] / "ejemplos"
+    )
+
+    monkeypatch.chdir(tmp_path)
+    assert len(catalog.list_examples()) == 4
+
+
+def test_salud(tmp_path: Path) -> None:
+    """The real app serves /api/salud with the locked shape."""
+    web = tmp_path / "web"
+    web.mkdir()
+    (web / "index.html").write_text("<h1>ok</h1>", encoding="utf-8")
+
+    app = _create_app(web_dir=web)
+    client = TestClient(app)
+    response = client.get("/api/salud")
+
+    assert response.status_code == 200
+    assert response.json() == {"estado": "ok"}
+
+
+def test_api_routes_not_shadowed_by_static(tmp_path: Path) -> None:
+    """A mounted static layer must not swallow /api/salud."""
+    web = tmp_path / "web"
+    web.mkdir()
+    (web / "index.html").write_text("<h1>ok</h1>", encoding="utf-8")
+
+    app = _create_app(web_dir=web)
+    client = TestClient(app)
+    response = client.get("/api/salud")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"estado": "ok"}
+
+
+def test_api_routes_registered_before_static_mount(tmp_path: Path) -> None:
+    """The /api router is registered before the /web mount in the real app.
+
+    This intentionally inspects ``app.routes`` order: Starlette appends Mount
+    objects in registration order. A plain GET /api/salud cannot detect the
+    order when the mount prefix is /web, because those prefixes are disjoint.
+    Keep this assertion coupled to the registration order on purpose.
+    """
+    web = tmp_path / "web"
+    web.mkdir()
+    (web / "index.html").write_text("<h1>ok</h1>", encoding="utf-8")
+
+    app = _create_app(web_dir=web)
+    paths = [getattr(route, "path", None) for route in app.routes]  # type: ignore[attr-defined]
+
+    assert "/api/salud" in paths
+    assert "/web" in paths
+    assert paths.index("/api/salud") < paths.index("/web")
+
+
+def test_unhandled_error_no_leak() -> None:
+    """Unhandled exceptions on the real app return the fixed 500 envelope."""
+    app = _create_app()
+
+    @app.get("/boom")  # type: ignore[attr-defined]
+    def boom() -> None:
+        raise RuntimeError("secret /home/kevin/app.py Traceback")
+
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.get("/boom")
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "errores": [
+            {"codigo": ERROR_INTERNO, "mensaje": ERROR_INTERNO_MESSAGE}
+        ]
+    }
+    assert "secret" not in response.text
+    assert "RuntimeError" not in response.text
