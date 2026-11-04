@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from automata.api.catalog import ExampleCatalog, ExampleEntry, ExampleNotFoundError
 from automata.api.deps import (
+    DependencyNotConfiguredError,
     get_catalog,
     get_inspector,
     get_simulator,
@@ -645,3 +646,23 @@ def test_dependency_provider_reports_missing_app_state() -> None:
     with pytest.raises(RuntimeError, match="simulator") as unset:
         get_simulator(request)
     assert unset.value.__class__.__name__ == "DependencyNotConfiguredError"
+
+
+def test_dependency_not_configured_maps_to_internal_error_envelope() -> None:
+    """A composition failure reaches the client as the fixed 500 envelope."""
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    @app.get("/missing-dependency")
+    def missing_dependency() -> None:
+        raise DependencyNotConfiguredError("simulator")
+
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.get("/missing-dependency")
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "errores": [
+            {"codigo": ERROR_INTERNO, "mensaje": ERROR_INTERNO_MESSAGE}
+        ]
+    }
