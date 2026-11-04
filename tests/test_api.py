@@ -10,13 +10,20 @@ import json
 import re
 from pathlib import Path
 from types import MappingProxyType
+from typing import Annotated
 
 import pytest
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from automata.api.catalog import ExampleCatalog, ExampleEntry, ExampleNotFoundError
+from automata.api.deps import (
+    get_catalog,
+    get_inspector,
+    get_simulator,
+    get_text_loader,
+)
 from automata.api.errors import (
     ERROR_INTERNO,
     ERROR_INTERNO_MESSAGE,
@@ -576,3 +583,65 @@ def test_example_not_found_beats_internal_handler() -> None:
     rendered = json.dumps(internal.json(), ensure_ascii=False)
     for leak in ("RuntimeError", "Traceback", "/home/", "secret", ".py"):
         assert leak not in rendered
+
+
+def test_dependency_providers_read_app_state() -> None:
+    """Providers return the exact objects stored on ``app.state``."""
+    text_loader = object()
+    simulator = object()
+    inspector = object()
+    catalog = object()
+    override_catalog = object()
+
+    app = FastAPI()
+    app.state.text_loader = text_loader
+    app.state.simulator = simulator
+    app.state.inspector = inspector
+    app.state.catalog = catalog
+
+    @app.get("/probe")
+    def probe(
+        loader: Annotated[object, Depends(get_text_loader)],
+        sim: Annotated[object, Depends(get_simulator)],
+        insp: Annotated[object, Depends(get_inspector)],
+        cat: Annotated[object, Depends(get_catalog)],
+    ) -> dict[str, bool]:
+        return {
+            "text_loader": loader is text_loader,
+            "simulator": sim is simulator,
+            "inspector": insp is inspector,
+            "catalog": cat is catalog,
+        }
+
+    @app.get("/override")
+    def override(
+        cat: Annotated[object, Depends(get_catalog)],
+    ) -> dict[str, bool]:
+        return {"overridden": cat is override_catalog}
+
+    client = TestClient(app)
+    assert client.get("/probe").json() == {
+        "text_loader": True,
+        "simulator": True,
+        "inspector": True,
+        "catalog": True,
+    }
+
+    app.dependency_overrides[get_catalog] = lambda: override_catalog
+    assert client.get("/override").json() == {"overridden": True}
+
+
+def test_dependency_provider_reports_missing_app_state() -> None:
+    """A missing/None state value raises a clear provider error, not AttributeError."""
+    app = FastAPI()
+    request = Request({"type": "http", "app": app})
+
+    with pytest.raises(RuntimeError, match="simulator") as missing:
+        get_simulator(request)
+    assert missing.value.__class__.__name__ == "DependencyNotConfiguredError"
+    assert not isinstance(missing.value, AttributeError)
+
+    app.state.simulator = None
+    with pytest.raises(RuntimeError, match="simulator") as unset:
+        get_simulator(request)
+    assert unset.value.__class__.__name__ == "DependencyNotConfiguredError"
