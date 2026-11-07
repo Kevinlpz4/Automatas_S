@@ -846,3 +846,136 @@ def test_unhandled_error_no_leak() -> None:
     }
     assert "secret" not in response.text
     assert "RuntimeError" not in response.text
+
+
+T10_EXPECTED_TIPOS = [
+    {"tipo": "AFD", "estado": "disponible"},
+    {"tipo": "AFN", "estado": "proximamente"},
+    {"tipo": "AFN-λ", "estado": "proximamente"},
+]
+
+T10_EXPECTED_EJEMPLOS = [
+    {"nombre": "afd_ejemplo.json", "tipo": "AFD"},
+    {"nombre": "afd_incompleto.json", "tipo": "AFD"},
+    {"nombre": "afn_ejemplo.json", "tipo": "AFN"},
+    {"nombre": "afn_lambda_ejemplo.json", "tipo": "AFN-λ"},
+]
+
+
+def test_tipos(client: TestClient) -> None:
+    """GET /api/tipos returns the three locked items in order."""
+    response = client.get("/api/tipos")
+
+    assert response.status_code == 200
+    assert response.json() == T10_EXPECTED_TIPOS
+
+
+def test_ejemplos_list(client: TestClient) -> None:
+    """GET /api/ejemplos returns the four whitelisted fixtures sorted."""
+    response = client.get("/api/ejemplos")
+
+    assert response.status_code == 200
+    assert response.json() == T10_EXPECTED_EJEMPLOS
+
+
+def test_ejemplo_raw_text(client: TestClient) -> None:
+    """GET /api/ejemplos/{nombre} returns the exact file text as plain text."""
+    response = client.get("/api/ejemplos/afd_ejemplo.json")
+
+    expected = (
+        Path(__file__).resolve().parents[1]
+        / "ejemplos"
+        / "afd_ejemplo.json"
+    ).read_text(encoding="utf-8")
+
+    assert response.status_code == 200
+    assert response.text == expected
+    assert response.headers["content-type"] == "text/plain; charset=utf-8"
+
+
+def test_ejemplo_unknown(client: TestClient) -> None:
+    """A non-whitelisted example returns the locked 404 envelope."""
+    response = client.get("/api/ejemplos/README.md")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "errores": [
+            {
+                "codigo": "EJEMPLO_NO_ENCONTRADO",
+                "mensaje": "No se encontró el ejemplo 'README.md'.",
+            }
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    "nombre",
+    ["afd_ejemplo.json.bak", "otro.json"],
+)
+def test_ejemplo_whitelist(client: TestClient, nombre: str) -> None:
+    """Only the four bundled filenames are allowed."""
+    response = client.get(f"/api/ejemplos/{nombre}")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "errores": [
+            {
+                "codigo": "EJEMPLO_NO_ENCONTRADO",
+                "mensaje": f"No se encontró el ejemplo '{nombre}'.",
+            }
+        ]
+    }
+
+
+class _SentinelCatalog:
+    """Catalog double that records calls and never touches the filesystem."""
+
+    def __init__(self) -> None:
+        self.list_calls = 0
+        self.read_calls: list[str] = []
+
+    def list_examples(self) -> tuple[ExampleEntry, ...]:
+        self.list_calls += 1
+        return (ExampleEntry(nombre="sentinela.json", tipo="AFD"),)
+
+    def read(self, nombre: str) -> str:
+        self.read_calls.append(nombre)
+        return f"sentinela:{nombre}"
+
+
+def test_api_ejemplos_uses_injected_catalog() -> None:
+    """Both catalog endpoints consume the catalog injected into the real app.
+
+    The sentinel never touches the filesystem. If either route constructed its
+    own ``ExampleCatalog``, the response would contain the four real fixtures
+    instead of the sentinel entry, so this pins real dependency injection.
+    """
+    from automata.api.app import create_app
+
+    catalog = _SentinelCatalog()
+    app = create_app(catalog=catalog)  # type: ignore[arg-type]
+    client = TestClient(app)
+
+    listing = client.get("/api/ejemplos")
+    assert listing.status_code == 200
+    assert listing.json() == [{"nombre": "sentinela.json", "tipo": "AFD"}]
+    assert catalog.list_calls == 1
+
+    raw = client.get("/api/ejemplos/sentinela.json")
+    assert raw.status_code == 200
+    assert raw.text == "sentinela:sentinela.json"
+    assert raw.headers["content-type"] == "text/plain; charset=utf-8"
+    assert catalog.read_calls == ["sentinela.json"]
+
+
+def test_content_types(client: TestClient) -> None:
+    """JSON endpoints use application/json and raw examples use plain text."""
+    json_paths = ["/api/salud", "/api/tipos", "/api/ejemplos"]
+    for path in json_paths:
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/json"
+
+    raw = client.get("/api/ejemplos/afd_ejemplo.json")
+    assert raw.status_code == 200
+    assert raw.headers["content-type"] == "text/plain; charset=utf-8"
