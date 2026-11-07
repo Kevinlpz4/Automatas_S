@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
-from typing import Annotated
+from typing import Annotated, cast
 
 import pytest
 from fastapi import Depends, FastAPI, Request
@@ -48,9 +49,16 @@ from automata.api.schemas import (
 from automata.api.vcodes import V_CODE_MAP, api_codigo, api_error
 from automata.models import validacion
 from automata.models.errores import InvalidAutomatonDefinition, MalformedJsonError
+from automata.models.json_estructura import parse_json_text
+from automata.models.tipos import TipoAutomata
 from automata.models.traza import ReasonCode, SimulationResult, TraceStep
-from automata.models.validacion import ValidationIssue, validate_structure
+from automata.models.validacion import (
+    ValidationIssue,
+    validate_semantics,
+    validate_structure,
+)
 from automata.models.vista import AutomatonSummary, TransitionView
+from automata.services.inspector import DefinitionInspector
 
 PHASE1_CODES = (
     validacion.MISSING_TIPO,
@@ -986,3 +994,446 @@ def test_content_types(client: TestClient) -> None:
     raw = client.get("/api/ejemplos/afd_ejemplo.json")
     assert raw.status_code == 200
     assert raw.headers["content-type"] == "text/plain; charset=utf-8"
+
+
+class _SentinelTextLoader:
+    """Text loader double that records the raw body and returns a sentinel."""
+
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+        self.automaton = object()
+
+    def load_text(self, text: str) -> object:
+        self.texts.append(text)
+        return self.automaton
+
+
+class _SentinelInspector:
+    """Inspector double that records the automaton and returns a summary."""
+
+    def __init__(self) -> None:
+        self.automatons: list[object] = []
+
+    def summarize(self, automaton: object) -> AutomatonSummary:
+        self.automatons.append(automaton)
+        return AutomatonSummary(
+            tipo="AFD",
+            estados=("q0", "q1"),
+            alfabeto=("a",),
+            inicial="q0",
+            finales=("q1",),
+            transiciones=(TransitionView("q0", "a", "q1"),),
+        )
+
+
+def test_api_validar_uses_injected_ports() -> None:
+    """The real /validar route consumes the injected text loader and inspector."""
+    from automata.api.app import create_app
+
+    loader = _SentinelTextLoader()
+    inspector = _SentinelInspector()
+    app = create_app(loader=loader, inspector=inspector)  # type: ignore[arg-type]
+    client = TestClient(app)
+
+    body = '{"tipo":"AFD"}'
+    response = client.post(
+        "/api/automatas/validar",
+        content=body,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "tipo": "AFD",
+        "estados": ["q0", "q1"],
+        "alfabeto": ["a"],
+        "inicial": "q0",
+        "finales": ["q1"],
+        "transiciones": [{"origen": "q0", "simbolo": "a", "destino": "q1"}],
+    }
+    assert loader.texts == [body]
+    assert inspector.automatons == [loader.automaton]
+
+
+def _example_text(nombre: str) -> str:
+    """Read one bundled example as raw UTF-8 text."""
+    return (
+        Path(__file__).resolve().parents[1] / "ejemplos" / nombre
+    ).read_text(encoding="utf-8")
+
+
+def _phase1_issue(fixture: str, issue_code: str) -> ValidationIssue:
+    """Return the phase-1 issue for ``issue_code`` from the same raw fixture."""
+    raw = parse_json_text(fixture).value
+    issues = validate_structure(raw)
+    if not issues:
+        mapping = cast(Mapping[str, object], raw)
+        tipo = TipoAutomata(cast(str, mapping["tipo"]))
+        issues = validate_semantics(mapping, tipo)
+    for issue in issues:
+        if issue.code == issue_code:
+            return issue
+    raise AssertionError(
+        f"El fixture no produce el código de fase 1 {issue_code!r}; "
+        f"producidos: {[issue.code for issue in issues]}"
+    )
+
+
+class _ExplodingSimulator:
+    """Simulator double that fails if /validar ever executes it."""
+
+    def simulate(self, automaton: object, word: str) -> object:
+        raise AssertionError("validar must not execute the simulator")
+
+
+class _RecordingInspector:
+    """Delegate inspector that records every automaton it summarizes."""
+
+    def __init__(self) -> None:
+        self.automatons: list[object] = []
+        self._delegate = DefinitionInspector()
+
+    def summarize(self, automaton: object) -> AutomatonSummary:
+        self.automatons.append(automaton)
+        return self._delegate.summarize(automaton)  # type: ignore[arg-type]
+
+
+AFD_EXAMPLE_TRANSITIONS = [
+    {"origen": "q0", "simbolo": "a", "destino": "q1"},
+    {"origen": "q0", "simbolo": "b", "destino": "q2"},
+    {"origen": "q0", "simbolo": "c", "destino": "q3"},
+    {"origen": "q1", "simbolo": "a", "destino": "q1"},
+    {"origen": "q1", "simbolo": "b", "destino": "q5"},
+    {"origen": "q1", "simbolo": "c", "destino": "q2"},
+    {"origen": "q2", "simbolo": "a", "destino": "q2"},
+    {"origen": "q2", "simbolo": "b", "destino": "q2"},
+    {"origen": "q2", "simbolo": "c", "destino": "q2"},
+    {"origen": "q3", "simbolo": "a", "destino": "q4"},
+    {"origen": "q3", "simbolo": "b", "destino": "q2"},
+    {"origen": "q3", "simbolo": "c", "destino": "q2"},
+    {"origen": "q4", "simbolo": "a", "destino": "q4"},
+    {"origen": "q4", "simbolo": "b", "destino": "q5"},
+    {"origen": "q4", "simbolo": "c", "destino": "q2"},
+    {"origen": "q5", "simbolo": "a", "destino": "q1"},
+    {"origen": "q5", "simbolo": "b", "destino": "q1"},
+    {"origen": "q5", "simbolo": "c", "destino": "q2"},
+]
+
+AFN_EXAMPLE_TRANSITIONS = [
+    {"origen": "q0", "simbolo": "a", "destino": "q0"},
+    {"origen": "q0", "simbolo": "a", "destino": "q1"},
+    {"origen": "q0", "simbolo": "b", "destino": "q0"},
+    {"origen": "q1", "simbolo": "b", "destino": "q2"},
+    {"origen": "q2", "simbolo": "a", "destino": "q2"},
+]
+
+AFN_LAMBDA_EXAMPLE_TRANSITIONS = [
+    {"origen": "q0", "simbolo": "a", "destino": "q1"},
+    {"origen": "q1", "simbolo": "b", "destino": "q2"},
+    {"origen": "q2", "simbolo": "a", "destino": "q2"},
+    {"origen": "q0", "simbolo": "λ", "destino": "q2"},
+    {"origen": "q1", "simbolo": "λ", "destino": "q1"},
+]
+
+VCODE_FIXTURES: dict[str, str] = {
+    validacion.MISSING_TIPO: (
+        '{"estados":["q0","q1"],"alfabeto":["a","b"],"inicial":"q0",'
+        '"finales":["q1"],"transiciones":{"q0":{"a":"q1","b":"q0"},'
+        '"q1":{"a":"q1","b":"q0"}}}'
+    ),
+    validacion.INVALID_TIPO: (
+        '{"tipo":"DFA","estados":["q0","q1"],"alfabeto":["a","b"],'
+        '"inicial":"q0","finales":["q1"],"transiciones":{'
+        '"q0":{"a":"q1","b":"q0"},"q1":{"a":"q1","b":"q0"}}}'
+    ),
+    validacion.MISSING_FIELD: (
+        '{"tipo":"AFD","estados":["q0","q1"],"inicial":"q0",'
+        '"finales":["q1"],"transiciones":{"q0":{"a":"q1"},'
+        '"q1":{"a":"q1"}}}'
+    ),
+    validacion.INVALID_FIELD_TYPE: (
+        '{"tipo":"AFD","estados":"q0","alfabeto":["a","b"],'
+        '"inicial":"q0","finales":["q1"],"transiciones":{}}'
+    ),
+    validacion.INVALID_ALPHABET_SYMBOL: (
+        '{"tipo":"AFD","estados":["q0","q1"],"alfabeto":["a","ab"],'
+        '"inicial":"q0","finales":["q1"],"transiciones":{'
+        '"q0":{"a":"q1"},"q1":{"a":"q1"}}}'
+    ),
+    validacion.DUPLICATE_ELEMENT: (
+        '{"tipo":"AFD","estados":["q0","q1","q0"],"alfabeto":["a","b"],'
+        '"inicial":"q0","finales":["q1"],"transiciones":{'
+        '"q0":{"a":"q1","b":"q0"},"q1":{"a":"q1","b":"q0"}}}'
+    ),
+    validacion.EMPTY_STATES: (
+        '{"tipo":"AFD","estados":[],"alfabeto":["a","b"],'
+        '"inicial":"q0","finales":["q1"],"transiciones":{}}'
+    ),
+    validacion.INITIAL_NOT_IN_STATES: (
+        '{"tipo":"AFD","estados":["q0","q1"],"alfabeto":["a","b"],'
+        '"inicial":"q9","finales":["q1"],"transiciones":{'
+        '"q0":{"a":"q1","b":"q0"},"q1":{"a":"q1","b":"q0"}}}'
+    ),
+    validacion.FINAL_NOT_IN_STATES: (
+        '{"tipo":"AFD","estados":["q0","q1"],"alfabeto":["a","b"],'
+        '"inicial":"q0","finales":["q1","q9"],"transiciones":{'
+        '"q0":{"a":"q1","b":"q0"},"q1":{"a":"q1","b":"q0"}}}'
+    ),
+    validacion.EMPTY_ALPHABET: (
+        '{"tipo":"AFD","estados":["q0","q1"],"alfabeto":[],'
+        '"inicial":"q0","finales":["q1"],"transiciones":{}}'
+    ),
+    validacion.UNKNOWN_TRANSITION_STATE: (
+        '{"tipo":"AFD","estados":["q0","q1"],"alfabeto":["a","b"],'
+        '"inicial":"q0","finales":["q1"],"transiciones":{'
+        '"q0":{"a":"q1","b":"q0"},"q1":{"a":"q1","b":"q0"},'
+        '"q9":{"a":"q0"}}}'
+    ),
+    validacion.UNKNOWN_DESTINATION_STATE: (
+        '{"tipo":"AFD","estados":["q0","q1"],"alfabeto":["a","b"],'
+        '"inicial":"q0","finales":["q1"],"transiciones":{'
+        '"q0":{"a":"q9","b":"q0"},"q1":{"a":"q1"}}}'
+    ),
+    validacion.SYMBOL_NOT_IN_ALPHABET: (
+        '{"tipo":"AFD","estados":["q0","q1"],"alfabeto":["a","b"],'
+        '"inicial":"q0","finales":["q1"],"transiciones":{'
+        '"q0":{"a":"q1","b":"q0","z":"q1"},'
+        '"q1":{"a":"q1","b":"q0"}}}'
+    ),
+    validacion.LAMBDA_FORBIDDEN: (
+        '{"tipo":"AFD","estados":["q0","q1"],"alfabeto":["a","b"],'
+        '"inicial":"q0","finales":["q1"],"transiciones":{'
+        '"q0":{"a":"q1","b":"q0","λ":"q1"},'
+        '"q1":{"a":"q1","b":"q0"}}}'
+    ),
+    validacion.INVALID_AFD_TARGET: (
+        '{"tipo":"AFD","estados":["q0","q1"],"alfabeto":["a","b"],'
+        '"inicial":"q0","finales":["q1"],"transiciones":{'
+        '"q0":{"a":["q1"],"b":"q0"},"q1":{"a":"q1"}}}'
+    ),
+    validacion.DUPLICATE_TRANSITION: (
+        '{"tipo":"AFN-λ","estados":["q0","q1"],"alfabeto":["a","b"],'
+        '"inicial":"q0","finales":["q1"],"transiciones":{'
+        '"q0":{"a":["q1"],"λ":["q1"],"λ":["q0"]},'
+        '"q1":{"b":["q1"]}}}'
+    ),
+    validacion.LAMBDA_IN_ALPHABET: (
+        '{"tipo":"AFD","estados":["q0","q1"],"alfabeto":["a","λ"],'
+        '"inicial":"q0","finales":["q1"],"transiciones":{'
+        '"q0":{"a":"q1"},"q1":{"a":"q1"}}}'
+    ),
+    validacion.INVALID_AFN_TARGET: (
+        '{"tipo":"AFN","estados":["q0","q1"],"alfabeto":["a","b"],'
+        '"inicial":"q0","finales":["q1"],"transiciones":{'
+        '"q0":{"a":"q1","b":["q0"]},"q1":{"a":["q1"]}}}'
+    ),
+}
+
+
+def test_validar_content_type_tolerance(client: TestClient) -> None:
+    """The raw body is accepted with and without a JSON charset parameter."""
+    body = _example_text("afd_ejemplo.json")
+    for headers in (
+        {},
+        {"content-type": "text/plain"},
+        {"content-type": "application/json"},
+        {"content-type": "application/json; charset=utf-8"},
+    ):
+        response = client.post(
+            "/api/automatas/validar",
+            content=body,
+            headers=headers,
+        )
+        assert response.status_code == 200, headers
+        assert response.json()["tipo"] == "AFD"
+
+
+def test_validar_afd_summary(client: TestClient) -> None:
+    """A valid AFD returns the exact phase-1 summary shape and order."""
+    response = client.post(
+        "/api/automatas/validar",
+        content=_example_text("afd_ejemplo.json"),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "tipo": "AFD",
+        "estados": ["q0", "q1", "q2", "q3", "q4", "q5"],
+        "alfabeto": ["a", "b", "c"],
+        "inicial": "q0",
+        "finales": ["q1", "q4"],
+        "transiciones": AFD_EXAMPLE_TRANSITIONS,
+    }
+
+
+def test_validar_transition_order_is_deterministic(client: TestClient) -> None:
+    """Two executions return the same transition order and identical bytes."""
+    body = _example_text("afd_ejemplo.json")
+    first = client.post(
+        "/api/automatas/validar",
+        content=body,
+        headers={"content-type": "application/json"},
+    )
+    second = client.post(
+        "/api/automatas/validar",
+        content=body,
+        headers={"content-type": "application/json"},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.content == second.content
+    assert first.json()["transiciones"] == AFD_EXAMPLE_TRANSITIONS
+
+
+def test_validar_afn_calls_inspector_like_afd() -> None:
+    """A valid AFN is summarized with 200; the route never filters by type."""
+    from automata.api.app import create_app
+
+    inspector = _RecordingInspector()
+    app = create_app(
+        inspector=inspector,
+        simulator=_ExplodingSimulator(),
+    )
+    client = TestClient(app)
+
+    afd = client.post(
+        "/api/automatas/validar",
+        content=_example_text("afd_ejemplo.json"),
+        headers={"content-type": "application/json"},
+    )
+    afn = client.post(
+        "/api/automatas/validar",
+        content=_example_text("afn_ejemplo.json"),
+        headers={"content-type": "application/json"},
+    )
+
+    assert afd.status_code == 200
+    assert afd.json()["tipo"] == "AFD"
+    assert afn.status_code == 200
+    assert afn.json() == {
+        "tipo": "AFN",
+        "estados": ["q0", "q1", "q2"],
+        "alfabeto": ["a", "b"],
+        "inicial": "q0",
+        "finales": ["q2"],
+        "transiciones": AFN_EXAMPLE_TRANSITIONS,
+    }
+    assert [type(automaton).__name__ for automaton in inspector.automatons] == [
+        "AFD",
+        "AFN",
+    ]
+
+
+def test_validar_afn_lambda_summary() -> None:
+    """AFN-λ validates as data with 200 and never executes the simulator."""
+    from automata.api.app import create_app
+
+    app = create_app(simulator=_ExplodingSimulator())
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/automatas/validar",
+        content=_example_text("afn_lambda_ejemplo.json"),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "tipo": "AFN-λ",
+        "estados": ["q0", "q1", "q2"],
+        "alfabeto": ["a", "b"],
+        "inicial": "q0",
+        "finales": ["q2"],
+        "transiciones": AFN_LAMBDA_EXAMPLE_TRANSITIONS,
+    }
+
+
+@pytest.mark.parametrize(
+    ("issue_code", "vcode"),
+    tuple(V_CODE_MAP.items()),
+    ids=tuple(V_CODE_MAP.values()),
+)
+def test_validar_vcodes(
+    client: TestClient,
+    issue_code: str,
+    vcode: str,
+) -> None:
+    """Every V-code in the locked map is produced by /validar for its fixture."""
+    fixture = VCODE_FIXTURES.get(issue_code)
+    if fixture is None:
+        pytest.fail(
+            f"Falta un fixture de fase 1 para el código {issue_code!r}; "
+            "agregalo antes de tocar la ruta."
+        )
+
+    expected = _phase1_issue(fixture, issue_code)
+    response = client.post(
+        "/api/automatas/validar",
+        content=fixture,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "errores": [{"codigo": vcode, "mensaje": expected.message}]
+    }
+
+
+def test_validar_invalid_root(client: TestClient) -> None:
+    """A non-object JSON root is reported as the symbolic INVALID_ROOT."""
+    response = client.post(
+        "/api/automatas/validar",
+        content="[]",
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "errores": [
+            {
+                "codigo": "INVALID_ROOT",
+                "mensaje": "El documento JSON debe ser un objeto.",
+            }
+        ]
+    }
+
+
+@pytest.mark.parametrize("body", ["{no es json", ""])
+def test_validar_json_invalido(client: TestClient, body: str) -> None:
+    """Malformed and empty bodies use the T07 JSON_INVALIDO envelope."""
+    response = client.post(
+        "/api/automatas/validar",
+        content=body,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "errores": [
+            {
+                "codigo": "JSON_INVALIDO",
+                "mensaje": "El cuerpo de la solicitud no contiene un JSON válido.",
+            }
+        ]
+    }
+
+
+def test_validar_non_utf8(client: TestClient) -> None:
+    """A non-UTF-8 body is rejected with JSON_INVALIDO, not a 500."""
+    response = client.post(
+        "/api/automatas/validar",
+        content=b"\xff\xfe",
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "errores": [
+            {
+                "codigo": "JSON_INVALIDO",
+                "mensaje": "El cuerpo de la solicitud no contiene un JSON válido.",
+            }
+        ]
+    }
