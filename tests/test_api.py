@@ -861,6 +861,13 @@ T10_EXPECTED_EJEMPLOS = [
     {"nombre": "afn_lambda_ejemplo.json", "tipo": "AFN-λ"},
 ]
 
+# R10 fixes the JSON media type, not Starlette's exact header formatting.
+# FastAPI currently sends ``application/json``; ``charset=utf-8`` is equally
+# valid for UTF-8 JSON (RFC 8259), so both forms are accepted on purpose.
+JSON_CONTENT_TYPES = frozenset(
+    {"application/json", "application/json; charset=utf-8"}
+)
+
 
 def test_tipos(client: TestClient) -> None:
     """GET /api/tipos returns the three locked items in order."""
@@ -974,7 +981,7 @@ def test_content_types(client: TestClient) -> None:
     for path in json_paths:
         response = client.get(path)
         assert response.status_code == 200
-        assert response.headers["content-type"] == "application/json"
+        assert response.headers["content-type"].lower() in JSON_CONTENT_TYPES
 
     raw = client.get("/api/ejemplos/afd_ejemplo.json")
     assert raw.status_code == 200
