@@ -21,6 +21,8 @@ from automata.api.schemas import ErrorItem, ErrorResponse
 from automata.api.vcodes import api_error
 from automata.models.errores import InvalidAutomatonDefinition, MalformedJsonError
 
+# Shared by /validar and /simular; the message identifies the failing body
+# part (outer wrapper vs inner automata text) for the client.
 JSON_INVALIDO = "JSON_INVALIDO"
 JSON_INVALIDO_MESSAGE = "El cuerpo de la solicitud no contiene un JSON válido."
 WRAPPER_JSON_INVALIDO_MESSAGE = (
@@ -66,7 +68,11 @@ class ApiError(Exception):
 
 
 class InvalidJsonBodyError(ApiError):
-    """The request body (or inner automaton text) is not valid JSON."""
+    """The request body (or inner automaton text) is not valid JSON.
+
+    ``codigo`` is shared by /validar and /simular; the caller-supplied
+    message identifies which body part failed.
+    """
 
     codigo = JSON_INVALIDO
 

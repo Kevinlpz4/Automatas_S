@@ -12,6 +12,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import PlainTextResponse
+from pydantic import ValidationError
 
 from automata.api.catalog import ExampleCatalog
 from automata.api.deps import (
@@ -20,7 +21,12 @@ from automata.api.deps import (
     get_simulator,
     get_text_loader,
 )
-from automata.api.errors import InvalidJsonBodyError, UnsupportedTypeError
+from automata.api.errors import (
+    INNER_JSON_INVALIDO_MESSAGE,
+    WRAPPER_JSON_INVALIDO_MESSAGE,
+    InvalidJsonBodyError,
+    UnsupportedTypeError,
+)
 from automata.api.schemas import (
     EjemploItem,
     ResumenAutomata,
@@ -28,6 +34,7 @@ from automata.api.schemas import (
     SimularRequest,
     TipoItem,
 )
+from automata.models.errores import MalformedJsonError
 from automata.models.tipos import AFD
 from automata.services.puertos import (
     AutomatonInspector,
@@ -94,13 +101,34 @@ async def validar(
 
 
 @router.post("/automatas/simular")
-def simular(
-    payload: SimularRequest,
+async def simular(
+    request: Request,
     text_loader: Annotated[AutomatonTextLoader, Depends(get_text_loader)],
     simulator: Annotated[Simulator, Depends(get_simulator)],
 ) -> ResultadoSimulacion:
-    """Load the wrapped automaton, reject non-AFD types and simulate the word."""
-    automaton = text_loader.load_text(payload.automata)
+    """Parse the wrapper, load the inner automaton and simulate an AFD word.
+
+    Precedence is locked: body JSON -> wrapper schema -> inner automaton JSON
+    -> domain validation -> supported type.  Wrapper and inner JSON failures
+    share ``JSON_INVALIDO`` but use distinct messages so the client can name
+    the failing body part.
+    """
+    body = await request.body()
+    try:
+        texto = body.decode("utf-8")
+    except UnicodeDecodeError:
+        raise InvalidJsonBodyError(WRAPPER_JSON_INVALIDO_MESSAGE) from None
+
+    try:
+        payload = SimularRequest.model_validate_json(texto)
+    except ValidationError:
+        raise InvalidJsonBodyError(WRAPPER_JSON_INVALIDO_MESSAGE) from None
+
+    try:
+        automaton = text_loader.load_text(payload.automata)
+    except MalformedJsonError:
+        raise InvalidJsonBodyError(INNER_JSON_INVALIDO_MESSAGE) from None
+
     if not isinstance(automaton, AFD):
         raise UnsupportedTypeError()
     return ResultadoSimulacion.from_result(

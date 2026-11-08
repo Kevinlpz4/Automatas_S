@@ -34,6 +34,7 @@ from automata.api.errors import (
     JSON_INVALIDO_MESSAGE,
     TIPO_NO_SOPORTADO,
     TIPO_NO_SOPORTADO_MESSAGE,
+    WRAPPER_JSON_INVALIDO_MESSAGE,
     ApiError,
     InvalidJsonBodyError,
     UnsupportedTypeError,
@@ -1479,6 +1480,13 @@ class _ExplodingNonAFDSimulator:
         )
 
 
+class _ExplodingValidAFDSimulator:
+    """Simulator double that raises a leaky native error for a valid AFD."""
+
+    def simulate(self, automaton: object, word: str) -> SimulationResult:
+        raise RuntimeError("secret /home/kevin/app.py Traceback")
+
+
 EMPTY_WORD_ACCEPTING_AFD = (
     '{"tipo":"AFD","estados":["q0"],"alfabeto":["a"],"inicial":"q0",'
     '"finales":["q0"],"transiciones":{"q0":{"a":"q0"}}}'
@@ -1835,3 +1843,317 @@ def test_simular_guard_prevents_non_afd_simulation() -> None:
             }
         ]
     }
+
+
+SIMULAR_WRAPPER_INVALID_BODIES = [
+    "{no es json",
+    "",
+    "[]",
+    '{"palabra":"a"}',
+    '{"automata":"{}"}',
+    '{"automata":123,"palabra":"a"}',
+    '{"automata":"{}","palabra":123}',
+    '{"automata":null,"palabra":"a"}',
+    '{"automata":"{}","palabra":null}',
+]
+
+
+@pytest.mark.parametrize("body", SIMULAR_WRAPPER_INVALID_BODIES)
+def test_simular_wrapper_invalido(client: TestClient, body: str) -> None:
+    """Outer body and wrapper schema failures use the wrapper message."""
+    response = client.post(
+        "/api/automatas/simular",
+        content=body,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "errores": [
+            {
+                "codigo": JSON_INVALIDO,
+                "mensaje": WRAPPER_JSON_INVALIDO_MESSAGE,
+            }
+        ]
+    }
+
+
+def test_simular_non_utf8(client: TestClient) -> None:
+    """A non-UTF-8 wrapper body is a wrapper JSON error, not a 500."""
+    response = client.post(
+        "/api/automatas/simular",
+        content=b"\xff\xfe",
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "errores": [
+            {
+                "codigo": JSON_INVALIDO,
+                "mensaje": WRAPPER_JSON_INVALIDO_MESSAGE,
+            }
+        ]
+    }
+
+
+@pytest.mark.parametrize("inner", ["{no es json", "", "  ", '{"tipo":'])
+def test_simular_json_invalido(client: TestClient, inner: str) -> None:
+    """A malformed inner ``automata`` string uses the inner JSON message."""
+    response = client.post(
+        "/api/automatas/simular",
+        json={"automata": inner, "palabra": "a"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "errores": [
+            {
+                "codigo": JSON_INVALIDO,
+                "mensaje": INNER_JSON_INVALIDO_MESSAGE,
+            }
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    ("issue_code", "vcode"),
+    tuple(V_CODE_MAP.items()),
+    ids=tuple(V_CODE_MAP.values()),
+)
+def test_simular_invalid_afn_vcodes(
+    client: TestClient,
+    issue_code: str,
+    vcode: str,
+) -> None:
+    """Every domain V-code wins over the non-AFD guard on /simular."""
+    fixture = VCODE_FIXTURES.get(issue_code)
+    if fixture is None:
+        pytest.fail(
+            f"Falta un fixture de fase 1 para el código {issue_code!r}; "
+            "agregalo antes de tocar la ruta."
+        )
+
+    expected = _phase1_issue(fixture, issue_code)
+    response = client.post(
+        "/api/automatas/simular",
+        json={"automata": fixture, "palabra": "a"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "errores": [{"codigo": vcode, "mensaje": expected.message}]
+    }
+
+
+def test_simular_error_precedence(client: TestClient) -> None:
+    """Precedence: body JSON -> wrapper -> inner JSON -> domain -> type."""
+    invalid_afn = VCODE_FIXTURES[validacion.INVALID_AFN_TARGET]
+    invalid_afn_issue = _phase1_issue(
+        invalid_afn, validacion.INVALID_AFN_TARGET
+    )
+    cases = [
+        (
+            "{no es json",
+            JSON_INVALIDO,
+            WRAPPER_JSON_INVALIDO_MESSAGE,
+        ),
+        (
+            '{"automata":"{no es json"}',
+            JSON_INVALIDO,
+            WRAPPER_JSON_INVALIDO_MESSAGE,
+        ),
+        (
+            '{"automata":"{no es json","palabra":"a"}',
+            JSON_INVALIDO,
+            INNER_JSON_INVALIDO_MESSAGE,
+        ),
+        (
+            json.dumps({"automata": invalid_afn, "palabra": "a"}),
+            "V18",
+            invalid_afn_issue.message,
+        ),
+        (
+            json.dumps(
+                {"automata": _example_text("afn_ejemplo.json"), "palabra": "a"}
+            ),
+            TIPO_NO_SOPORTADO,
+            TIPO_NO_SOPORTADO_MESSAGE,
+        ),
+    ]
+
+    for body, codigo, mensaje in cases:
+        response = client.post(
+            "/api/automatas/simular",
+            content=body,
+            headers={"content-type": "application/json"},
+        )
+        assert response.status_code == 422
+        assert response.json() == {
+            "errores": [{"codigo": codigo, "mensaje": mensaje}]
+        }
+
+
+def test_no_native_exception_leak() -> None:
+    """No /simular error path leaks native classes, paths or ``detail``."""
+    from automata.api.app import create_app
+
+    invalid_afn = VCODE_FIXTURES[validacion.INVALID_AFN_TARGET]
+    app = create_app(simulator=_ExplodingValidAFDSimulator())
+    client = TestClient(app, raise_server_exceptions=False)
+
+    cases = [
+        ("{no es json", 422),
+        (json.dumps({"automata": "{no es json", "palabra": "a"}), 422),
+        (json.dumps({"automata": invalid_afn, "palabra": "a"}), 422),
+        (
+            json.dumps(
+                {"automata": _example_text("afn_ejemplo.json"), "palabra": "a"}
+            ),
+            422,
+        ),
+        (
+            json.dumps(
+                {"automata": _example_text("afd_ejemplo.json"), "palabra": "a"}
+            ),
+            500,
+        ),
+    ]
+
+    for body, expected_status in cases:
+        response = client.post(
+            "/api/automatas/simular",
+            content=body,
+            headers={"content-type": "application/json"},
+        )
+        assert response.status_code == expected_status
+        for leak in (
+            "Traceback",
+            "RuntimeError",
+            "/home/",
+            ".py",
+            "secret",
+            "detail",
+        ):
+            assert leak not in response.text
+        payload = response.json()
+        assert set(payload) == {"errores"}
+        for item in payload["errores"]:
+            assert set(item) == {"codigo", "mensaje"}
+
+
+def test_simular_error_payload_exact_shape(client: TestClient) -> None:
+    """Every /simular controlled error has exactly codigo and mensaje."""
+    cases = [
+        "{no es json",
+        json.dumps({"automata": "{no es json", "palabra": "a"}),
+        json.dumps(
+            {
+                "automata": VCODE_FIXTURES[validacion.INVALID_AFN_TARGET],
+                "palabra": "a",
+            }
+        ),
+        json.dumps(
+            {"automata": _example_text("afn_ejemplo.json"), "palabra": "a"}
+        ),
+    ]
+
+    for body in cases:
+        response = client.post(
+            "/api/automatas/simular",
+            content=body,
+            headers={"content-type": "application/json"},
+        )
+        assert response.status_code == 422
+        payload = response.json()
+        assert set(payload) == {"errores"}
+        assert len(payload["errores"]) == 1
+        assert set(payload["errores"][0]) == {"codigo", "mensaje"}
+
+
+def test_simular_never_uses_request_validation_handler() -> None:
+    """After T13, /simular parses its own body: no RequestValidationError."""
+    from fastapi.exceptions import RequestValidationError
+    from fastapi.responses import JSONResponse
+
+    from automata.api.app import create_app
+
+    calls: list[RequestValidationError] = []
+
+    async def sentinel_handler(
+        _request: Request,
+        exc: RequestValidationError,
+    ) -> JSONResponse:
+        calls.append(exc)
+        return JSONResponse(status_code=599, content={"sentinel": True})
+
+    app = create_app()
+    app.add_exception_handler(RequestValidationError, sentinel_handler)
+    client = TestClient(app)
+
+    bodies = [
+        "{no es json",
+        "",
+        "[]",
+        '{"palabra":"a"}',
+        '{"automata":123,"palabra":"a"}',
+    ]
+    for body in bodies:
+        response = client.post(
+            "/api/automatas/simular",
+            content=body,
+            headers={"content-type": "application/json"},
+        )
+        assert response.status_code == 422
+        assert response.json() == {
+            "errores": [
+                {
+                    "codigo": JSON_INVALIDO,
+                    "mensaje": WRAPPER_JSON_INVALIDO_MESSAGE,
+                }
+            ]
+        }
+    assert calls == []
+
+
+def test_json_invalido_code_shared_with_endpoint_specific_messages(
+    client: TestClient,
+) -> None:
+    """JSON_INVALIDO is shared; the message names the failing body part."""
+    validar = client.post(
+        "/api/automatas/validar",
+        content="{no es json",
+        headers={"content-type": "application/json"},
+    )
+    wrapper = client.post(
+        "/api/automatas/simular",
+        content="{no es json",
+        headers={"content-type": "application/json"},
+    )
+    inner = client.post(
+        "/api/automatas/simular",
+        json={"automata": "{no es json", "palabra": "a"},
+    )
+
+    for response in (validar, wrapper, inner):
+        assert response.status_code == 422
+        assert response.json()["errores"][0]["codigo"] == JSON_INVALIDO
+
+    assert validar.json()["errores"][0]["mensaje"] == JSON_INVALIDO_MESSAGE
+    assert wrapper.json()["errores"][0]["mensaje"] == WRAPPER_JSON_INVALIDO_MESSAGE
+    assert inner.json()["errores"][0]["mensaje"] == INNER_JSON_INVALIDO_MESSAGE
+    assert len(
+        {
+            validar.json()["errores"][0]["mensaje"],
+            wrapper.json()["errores"][0]["mensaje"],
+            inner.json()["errores"][0]["mensaje"],
+        }
+    ) == 3
+
+
+def test_invalid_automaton_definition_is_not_malformed_json() -> None:
+    """Domain validation must not be caught as an inner-JSON syntax error."""
+    from automata.services.texto import MalformedJsonTextError
+
+    assert not issubclass(InvalidAutomatonDefinition, MalformedJsonError)
+    assert issubclass(MalformedJsonTextError, MalformedJsonError)
