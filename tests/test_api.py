@@ -1437,3 +1437,401 @@ def test_validar_non_utf8(client: TestClient) -> None:
             }
         ]
     }
+
+
+class _SentinelAFDLoader:
+    """Text loader double that records the inner text and returns a real AFD."""
+
+    def __init__(self, automaton: object) -> None:
+        self.automaton = automaton
+        self.texts: list[str] = []
+
+    def load_text(self, text: str) -> object:
+        self.texts.append(text)
+        return self.automaton
+
+
+class _SentinelSimulator:
+    """Simulator double that records calls and returns a fixed result."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, str]] = []
+        self.result = SimulationResult(
+            word="ca",
+            accepted=True,
+            final_state="q4",
+            reason=ReasonCode.ACCEPTED,
+            explanation="sentinel",
+            trace=(),
+        )
+
+    def simulate(self, automaton: object, word: str) -> SimulationResult:
+        self.calls.append((automaton, word))
+        return self.result
+
+
+class _ExplodingNonAFDSimulator:
+    """Simulator double that must never be called with a non-AFD automaton."""
+
+    def simulate(self, automaton: object, word: str) -> SimulationResult:
+        raise AssertionError(
+            "simular must reject a non-AFD before calling the simulator"
+        )
+
+
+EMPTY_WORD_ACCEPTING_AFD = (
+    '{"tipo":"AFD","estados":["q0"],"alfabeto":["a"],"inicial":"q0",'
+    '"finales":["q0"],"transiciones":{"q0":{"a":"q0"}}}'
+)
+
+
+def test_api_simular_uses_injected_ports() -> None:
+    """The real /simular route consumes the injected text loader and simulator."""
+    from automata.api.app import create_app
+    from automata.services.texto import JsonAutomatonTextLoader
+
+    automaton = JsonAutomatonTextLoader().load_text(
+        _example_text("afd_ejemplo.json")
+    )
+    loader = _SentinelAFDLoader(automaton)
+    simulator = _SentinelSimulator()
+    app = create_app(loader=loader, simulator=simulator)  # type: ignore[arg-type]
+    client = TestClient(app)
+
+    inner = _example_text("afd_ejemplo.json")
+    response = client.post(
+        "/api/automatas/simular",
+        json={"automata": inner, "palabra": "ca"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "palabra": "ca",
+        "aceptada": True,
+        "estado_final": "q4",
+        "motivo": "accepted",
+        "explicacion": "sentinel",
+        "traza": [],
+    }
+    assert loader.texts == [inner]
+    assert simulator.calls == [(automaton, "ca")]
+
+
+def test_simular_accepted(client: TestClient) -> None:
+    """A word ending in a final state is accepted with its full trace."""
+    response = client.post(
+        "/api/automatas/simular",
+        json={"automata": _example_text("afd_ejemplo.json"), "palabra": "ca"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "palabra": "ca",
+        "aceptada": True,
+        "estado_final": "q4",
+        "motivo": "accepted",
+        "explicacion": "La palabra 'ca' es aceptada: terminó en el estado final 'q4'.",
+        "traza": [
+            {
+                "paso": 1,
+                "origen": "q0",
+                "simbolo": "c",
+                "destino": "q3",
+                "destino_es_final": False,
+                "transicion_faltante": False,
+            },
+            {
+                "paso": 2,
+                "origen": "q3",
+                "simbolo": "a",
+                "destino": "q4",
+                "destino_es_final": True,
+                "transicion_faltante": False,
+            },
+        ],
+    }
+
+
+def test_simular_rejected_non_final(client: TestClient) -> None:
+    """A word ending in a non-final state is rejected without stopping early."""
+    response = client.post(
+        "/api/automatas/simular",
+        json={"automata": _example_text("afd_ejemplo.json"), "palabra": "ab"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "palabra": "ab",
+        "aceptada": False,
+        "estado_final": "q5",
+        "motivo": "rejected-non-final",
+        "explicacion": (
+            "La palabra 'ab' es rechazada: terminó en el estado 'q5', "
+            "que no es final."
+        ),
+        "traza": [
+            {
+                "paso": 1,
+                "origen": "q0",
+                "simbolo": "a",
+                "destino": "q1",
+                "destino_es_final": True,
+                "transicion_faltante": False,
+            },
+            {
+                "paso": 2,
+                "origen": "q1",
+                "simbolo": "b",
+                "destino": "q5",
+                "destino_es_final": False,
+                "transicion_faltante": False,
+            },
+        ],
+    }
+
+
+def test_simular_empty_word_accepted(client: TestClient) -> None:
+    """The empty word is accepted when the initial state is final."""
+    response = client.post(
+        "/api/automatas/simular",
+        json={"automata": EMPTY_WORD_ACCEPTING_AFD, "palabra": ""},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "palabra": "",
+        "aceptada": True,
+        "estado_final": "q0",
+        "motivo": "accepted",
+        "explicacion": (
+            "La palabra vacía (λ) es aceptada: el estado inicial 'q0' es final."
+        ),
+        "traza": [],
+    }
+
+
+def test_simular_empty_word_rejected(client: TestClient) -> None:
+    """The empty word is rejected when the initial state is not final."""
+    response = client.post(
+        "/api/automatas/simular",
+        json={"automata": _example_text("afd_ejemplo.json"), "palabra": ""},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "palabra": "",
+        "aceptada": False,
+        "estado_final": "q0",
+        "motivo": "rejected-non-final",
+        "explicacion": (
+            "La palabra vacía (λ) es rechazada: el estado inicial 'q0' "
+            "no es final."
+        ),
+        "traza": [],
+    }
+
+
+def test_simular_missing_transition(client: TestClient) -> None:
+    """A missing transition stops the trace with a null destination."""
+    response = client.post(
+        "/api/automatas/simular",
+        json={"automata": _example_text("afd_incompleto.json"), "palabra": "ca"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "palabra": "ca",
+        "aceptada": False,
+        "estado_final": None,
+        "motivo": "rejected-missing-transition",
+        "explicacion": (
+            "La palabra 'ca' es rechazada: no hay transición desde 'q3' "
+            "con 'a' (paso 2)."
+        ),
+        "traza": [
+            {
+                "paso": 1,
+                "origen": "q0",
+                "simbolo": "c",
+                "destino": "q3",
+                "destino_es_final": False,
+                "transicion_faltante": False,
+            },
+            {
+                "paso": 2,
+                "origen": "q3",
+                "simbolo": "a",
+                "destino": None,
+                "destino_es_final": False,
+                "transicion_faltante": True,
+            },
+        ],
+    }
+
+
+def test_simular_symbol_outside_alphabet(client: TestClient) -> None:
+    """An off-alphabet symbol stops the trace with a null destination."""
+    response = client.post(
+        "/api/automatas/simular",
+        json={"automata": _example_text("afd_ejemplo.json"), "palabra": "az"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "palabra": "az",
+        "aceptada": False,
+        "estado_final": None,
+        "motivo": "rejected-symbol-not-in-alphabet",
+        "explicacion": (
+            "La palabra 'az' es rechazada: el símbolo 'z' no pertenece "
+            "al alfabeto (paso 2)."
+        ),
+        "traza": [
+            {
+                "paso": 1,
+                "origen": "q0",
+                "simbolo": "a",
+                "destino": "q1",
+                "destino_es_final": True,
+                "transicion_faltante": False,
+            },
+            {
+                "paso": 2,
+                "origen": "q1",
+                "simbolo": "z",
+                "destino": None,
+                "destino_es_final": False,
+                "transicion_faltante": True,
+            },
+        ],
+    }
+
+
+def test_simular_response_shape(client: TestClient) -> None:
+    """The simulation response uses exactly the locked Spanish keys."""
+    response = client.post(
+        "/api/automatas/simular",
+        json={"automata": _example_text("afd_ejemplo.json"), "palabra": "ca"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {
+        "palabra",
+        "aceptada",
+        "estado_final",
+        "motivo",
+        "explicacion",
+        "traza",
+    }
+    assert set(body["traza"][0]) == {
+        "paso",
+        "origen",
+        "simbolo",
+        "destino",
+        "destino_es_final",
+        "transicion_faltante",
+    }
+
+
+def test_simular_motivo_values(client: TestClient) -> None:
+    """Every verdict uses its frozen phase-1 reason code."""
+    cases = {
+        "ca": "accepted",
+        "ab": "rejected-non-final",
+        "az": "rejected-symbol-not-in-alphabet",
+    }
+    for word, motivo in cases.items():
+        response = client.post(
+            "/api/automatas/simular",
+            json={"automata": _example_text("afd_ejemplo.json"), "palabra": word},
+        )
+        assert response.status_code == 200
+        assert response.json()["motivo"] == motivo
+
+    missing = client.post(
+        "/api/automatas/simular",
+        json={"automata": _example_text("afd_incompleto.json"), "palabra": "ca"},
+    )
+    assert missing.status_code == 200
+    assert missing.json()["motivo"] == "rejected-missing-transition"
+
+
+def test_simular_afn_unsupported(client: TestClient) -> None:
+    """A valid AFN is a controlled 422, never a 500 or a 200."""
+    response = client.post(
+        "/api/automatas/simular",
+        json={"automata": _example_text("afn_ejemplo.json"), "palabra": "a"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "errores": [
+            {
+                "codigo": "TIPO_NO_SOPORTADO",
+                "mensaje": "La simulación solo está disponible para AFD.",
+            }
+        ]
+    }
+
+
+def test_simular_afn_lambda_unsupported(client: TestClient) -> None:
+    """A valid AFN-λ is a controlled 422, never a 500 or a 200."""
+    response = client.post(
+        "/api/automatas/simular",
+        json={
+            "automata": _example_text("afn_lambda_ejemplo.json"),
+            "palabra": "a",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "errores": [
+            {
+                "codigo": "TIPO_NO_SOPORTADO",
+                "mensaje": "La simulación solo está disponible para AFD.",
+            }
+        ]
+    }
+
+
+def test_simular_invalid_afn_returns_vcode_not_unsupported(
+    client: TestClient,
+) -> None:
+    """AFN validation wins over the non-AFD guard: real V-code, not unsupported."""
+    fixture = VCODE_FIXTURES[validacion.INVALID_AFN_TARGET]
+    expected = _phase1_issue(fixture, validacion.INVALID_AFN_TARGET)
+
+    response = client.post(
+        "/api/automatas/simular",
+        json={"automata": fixture, "palabra": "a"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "errores": [{"codigo": "V18", "mensaje": expected.message}]
+    }
+
+
+def test_simular_guard_prevents_non_afd_simulation() -> None:
+    """The AFN guard must stop the request before the simulator is called."""
+    from automata.api.app import create_app
+
+    app = create_app(simulator=_ExplodingNonAFDSimulator())
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/automatas/simular",
+        json={"automata": _example_text("afn_ejemplo.json"), "palabra": "a"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "errores": [
+            {
+                "codigo": "TIPO_NO_SOPORTADO",
+                "mensaje": "La simulación solo está disponible para AFD.",
+            }
+        ]
+    }

@@ -1,8 +1,9 @@
 """HTTP routes over the API service ports.
 
 T09 established the router and the health endpoint. T10 adds the read-only
-types/examples surface; T11 adds validation. Simulation lands in T12-T13
-without changing the composition root contract.
+types/examples surface; T11 adds validation and T12 adds AFD simulation.
+Simulation error precedence lands in T13 without changing the composition
+root contract.
 """
 
 from __future__ import annotations
@@ -13,10 +14,26 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import PlainTextResponse
 
 from automata.api.catalog import ExampleCatalog
-from automata.api.deps import get_catalog, get_inspector, get_text_loader
-from automata.api.errors import InvalidJsonBodyError
-from automata.api.schemas import EjemploItem, ResumenAutomata, TipoItem
-from automata.services.puertos import AutomatonInspector, AutomatonTextLoader
+from automata.api.deps import (
+    get_catalog,
+    get_inspector,
+    get_simulator,
+    get_text_loader,
+)
+from automata.api.errors import InvalidJsonBodyError, UnsupportedTypeError
+from automata.api.schemas import (
+    EjemploItem,
+    ResumenAutomata,
+    ResultadoSimulacion,
+    SimularRequest,
+    TipoItem,
+)
+from automata.models.tipos import AFD
+from automata.services.puertos import (
+    AutomatonInspector,
+    AutomatonTextLoader,
+    Simulator,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -74,3 +91,18 @@ async def validar(
 
     automaton = text_loader.load_text(texto)
     return ResumenAutomata.from_summary(inspector.summarize(automaton))
+
+
+@router.post("/automatas/simular")
+def simular(
+    payload: SimularRequest,
+    text_loader: Annotated[AutomatonTextLoader, Depends(get_text_loader)],
+    simulator: Annotated[Simulator, Depends(get_simulator)],
+) -> ResultadoSimulacion:
+    """Load the wrapped automaton, reject non-AFD types and simulate the word."""
+    automaton = text_loader.load_text(payload.automata)
+    if not isinstance(automaton, AFD):
+        raise UnsupportedTypeError()
+    return ResultadoSimulacion.from_result(
+        simulator.simulate(automaton, payload.palabra)
+    )
