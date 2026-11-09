@@ -7,6 +7,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 STATE_MODULE = ROOT / "web" / "js" / "state.js"
+API_MODULE = ROOT / "web" / "js" / "api.js"
 
 
 def _node() -> str:
@@ -32,6 +33,17 @@ def _node() -> str:
 
 def _run_state_script(script: str) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "STATE_MODULE": str(STATE_MODULE)}
+    return subprocess.run(
+        [_node(), "--input-type=module", "-e", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _run_api_script(script: str) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "API_MODULE": str(API_MODULE)}
     return subprocess.run(
         [_node(), "--input-type=module", "-e", script],
         env=env,
@@ -121,6 +133,7 @@ mod.setSummary(afn);
 assert.equal(mod.state.summary, afn);
 assert.equal(mod.state.simularHabilitado, false);
 
+// Literal from automata/models/tipos.py:16 (TipoAutomata.AFN_LAMBDA).
 const afnLambda = { tipo: "AFN-λ", estados: ["q0"] };
 mod.setSummary(afnLambda);
 assert.equal(mod.state.summary, afnLambda);
@@ -131,6 +144,103 @@ assert.equal(mod.state.summary, null);
 assert.equal(mod.state.simularHabilitado, false);
 
 console.log("summary-gating-ok");
+"""
+
+
+API_ENDPOINTS_SCRIPT = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const calls = [];
+const responses = {
+  "GET /api/salud": { estado: "ok" },
+  "GET /api/tipos": [{ tipo: "AFD", estado: "disponible" }],
+  "GET /api/ejemplos": [{ nombre: "afd_ejemplo.json", tipo: "AFD" }],
+  "GET /api/ejemplos/afd_ejemplo.json": '{"tipo":"AFD"}',
+  "POST /api/automatas/validar": { tipo: "AFD", estados: ["q0"] },
+  "POST /api/automatas/simular": { palabra: "a", aceptada: true },
+};
+
+globalThis.fetch = async (url, options = {}) => {
+  const method = options.method ?? "GET";
+  const key = `${method} ${url}`;
+  calls.push({ method, url, options });
+  const body = responses[key];
+  if (body === undefined) throw new Error(`unexpected fetch: ${key}`);
+  return {
+    ok: true,
+    status: 200,
+    async json() { return body; },
+    async text() { return body; },
+  };
+};
+
+const api = await import(pathToFileURL(process.env.API_MODULE).href);
+
+assert.deepEqual(await api.getSalud(), { estado: "ok" });
+assert.equal(calls.at(-1).method, "GET");
+assert.equal(calls.at(-1).url, "/api/salud");
+
+assert.deepEqual(await api.getTipos(), [{ tipo: "AFD", estado: "disponible" }]);
+assert.equal(calls.at(-1).url, "/api/tipos");
+
+assert.deepEqual(await api.getEjemplos(), [{ nombre: "afd_ejemplo.json", tipo: "AFD" }]);
+assert.equal(calls.at(-1).url, "/api/ejemplos");
+
+const ejemplo = await api.getEjemplo("afd_ejemplo.json");
+assert.equal(typeof ejemplo, "string");
+assert.equal(ejemplo, '{"tipo":"AFD"}');
+assert.equal(calls.at(-1).url, "/api/ejemplos/afd_ejemplo.json");
+
+assert.deepEqual(await api.validar('{"tipo":"AFD"}'), { tipo: "AFD", estados: ["q0"] });
+assert.equal(calls.at(-1).method, "POST");
+assert.equal(calls.at(-1).url, "/api/automatas/validar");
+assert.equal(calls.at(-1).options.headers["Content-Type"], "application/json");
+assert.equal(calls.at(-1).options.body, '{"tipo":"AFD"}');
+
+assert.deepEqual(await api.simular('{"tipo":"AFD"}', "a"), { palabra: "a", aceptada: true });
+assert.equal(calls.at(-1).method, "POST");
+assert.equal(calls.at(-1).url, "/api/automatas/simular");
+assert.equal(calls.at(-1).options.headers["Content-Type"], "application/json");
+assert.deepEqual(JSON.parse(calls.at(-1).options.body), {
+  automata: '{"tipo":"AFD"}',
+  palabra: "a",
+});
+
+console.log("api-endpoints-ok");
+"""
+
+
+API_ERROR_SCRIPT = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const envelope = {
+  errores: [{ codigo: "V01", mensaje: "El campo 'tipo' es obligatorio." }],
+};
+
+globalThis.fetch = async () => ({
+  ok: false,
+  status: 422,
+  async json() { return envelope; },
+  async text() { return JSON.stringify(envelope); },
+});
+
+const api = await import(pathToFileURL(process.env.API_MODULE).href);
+
+for (const call of [
+  () => api.validar('{"tipo":"AFD"}'),
+  () => api.simular('{"tipo":"AFD"}', "a"),
+]) {
+  await assert.rejects(call, (error) => {
+    assert.ok(error instanceof api.ApiError);
+    assert.equal(error.name, "ApiError");
+    assert.deepEqual(error.errores, envelope.errores);
+    return true;
+  });
+}
+
+console.log("api-error-parsing-ok");
 """
 
 
@@ -151,4 +261,27 @@ def test_front_invalidation_policy() -> None:
 
 def test_front_summary_gating() -> None:
     result = _run_state_script(SUMMARY_GATING_SCRIPT)
+    _assert_node_ok(result)
+
+
+def test_front_gating_literal_matches_backend() -> None:
+    """Guard that the JS gating test uses the same AFN-λ literal as the enum.
+
+    This checks text presence, not runtime gating; the runtime behavior is
+    covered by test_front_summary_gating.
+    """
+    from automata.models.tipos import TipoAutomata
+
+    literal = TipoAutomata.AFN_LAMBDA.value
+    assert literal == "AFN-λ"
+    assert f'tipo: "{literal}"' in SUMMARY_GATING_SCRIPT
+
+
+def test_front_api_endpoints() -> None:
+    result = _run_api_script(API_ENDPOINTS_SCRIPT)
+    _assert_node_ok(result)
+
+
+def test_front_api_error_parsing() -> None:
+    result = _run_api_script(API_ERROR_SCRIPT)
     _assert_node_ok(result)
