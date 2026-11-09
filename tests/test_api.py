@@ -836,6 +836,55 @@ def test_api_routes_registered_before_static_mount(tmp_path: Path) -> None:
     assert paths.index("/api/salud") < paths.index("/web")
 
 
+def test_front_root(client: TestClient) -> None:
+    """GET / serves the static HTML shell."""
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "<html" in response.text.lower()
+
+
+def test_front_asset(client: TestClient) -> None:
+    """GET /web/styles.css serves the real CSS asset."""
+    from automata.api.app import WEB_DIR
+
+    response = client.get("/web/styles.css")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/css")
+    assert len(response.content) > 0
+    assert response.text == (WEB_DIR / "styles.css").read_text(encoding="utf-8")
+
+
+def test_api_routes_not_shadowed(client: TestClient) -> None:
+    """The real static layer must not swallow any /api/* route."""
+    salud = client.get("/api/salud")
+    tipos = client.get("/api/tipos")
+    ejemplos = client.get("/api/ejemplos")
+
+    assert salud.status_code == 200
+    assert salud.json() == {"estado": "ok"}
+    assert tipos.status_code == 200
+    assert tipos.json() == T10_EXPECTED_TIPOS
+    assert ejemplos.status_code == 200
+    assert ejemplos.json() == T10_EXPECTED_EJEMPLOS
+
+    root = client.get("/")
+    assert root.status_code == 200
+    assert root.headers["content-type"].startswith("text/html")
+
+    asset = client.get("/web/styles.css")
+    assert asset.status_code == 200
+    assert asset.headers["content-type"].startswith("text/css")
+
+    paths = [getattr(route, "path", None) for route in client.app.routes]  # type: ignore[attr-defined]
+    for api_path in ("/api/salud", "/api/tipos", "/api/ejemplos"):
+        assert api_path in paths
+        assert paths.index(api_path) < paths.index("/web")
+        assert paths.index(api_path) < paths.index("/")
+
+
 def test_unhandled_error_no_leak() -> None:
     """Unhandled exceptions on the real app return the fixed 500 envelope."""
     app = _create_app()
@@ -991,6 +1040,10 @@ def test_content_types(client: TestClient) -> None:
         response = client.get(path)
         assert response.status_code == 200
         assert response.headers["content-type"].lower() in JSON_CONTENT_TYPES
+
+    tipos = client.get("/api/tipos")
+    assert "λ" in tipos.text
+    assert "\\u03bb" not in tipos.text.lower()
 
     raw = client.get("/api/ejemplos/afd_ejemplo.json")
     assert raw.status_code == 200
