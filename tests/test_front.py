@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 STATE_MODULE = ROOT / "web" / "js" / "state.js"
 API_MODULE = ROOT / "web" / "js" / "api.js"
 DOM_MODULE = ROOT / "web" / "js" / "dom.js"
+DIAGRAM_MODULE = ROOT / "web" / "js" / "diagram.js"
 
 
 def _node() -> str:
@@ -56,6 +57,17 @@ def _run_api_script(script: str) -> subprocess.CompletedProcess[str]:
 
 def _run_dom_script(script: str) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "DOM_MODULE": str(DOM_MODULE)}
+    return subprocess.run(
+        [_node(), "--input-type=module", "-e", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _run_diagram_script(script: str) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "DIAGRAM_MODULE": str(DIAGRAM_MODULE)}
     return subprocess.run(
         [_node(), "--input-type=module", "-e", script],
         env=env,
@@ -322,6 +334,236 @@ console.log("toast-aria-ok");
 """
 
 
+DIAGRAM_LAYOUT_SCRIPT = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.DIAGRAM_MODULE).href);
+assert.equal(typeof mod.layoutDiagram, "function");
+assert.equal(typeof mod.groupLabels, "function");
+assert.equal(typeof mod.highlightStep, "function");
+assert.equal(typeof mod.clearHighlight, "function");
+assert.equal(typeof mod.toSvg, "function");
+
+const summary = {
+  tipo: "AFD",
+  estados: ["q0", "q1", "q2", "q3"],
+  alfabeto: ["a", "b"],
+  inicial: "q0",
+  finales: ["q3"],
+  transiciones: [
+    { origen: "q0", simbolo: "a", destino: "q1" },
+    { origen: "q1", simbolo: "a", destino: "q0" },
+    { origen: "q1", simbolo: "b", destino: "q2" },
+    { origen: "q2", simbolo: "a", destino: "q3" },
+    { origen: "q3", simbolo: "a", destino: "q0" },
+    { origen: "q3", simbolo: "b", destino: "q3" },
+  ],
+};
+
+const layout = mod.layoutDiagram(summary);
+assert.equal(layout.role, "img");
+assert.equal(layout.title, "Diagrama del autómata");
+assert.equal(layout.desc, "Estados, transiciones y estado inicial.");
+assert.equal(layout.width, 640);
+assert.equal(layout.height, 480);
+assert.equal(layout.radius, 28);
+assert.equal(layout.nodes.length, 4);
+assert.equal(layout.edges.length, 6);
+assert.equal(layout.highlight, null);
+assert.equal(layout.markers[0].id, "arrow");
+assert.equal(layout.markers[0].markerWidth, 10);
+assert.equal(layout.markers[0].markerHeight, 10);
+assert.equal(layout.markers[0].refX, 9);
+assert.equal(layout.markers[0].refY, 3);
+assert.equal(layout.markers[0].orient, "auto");
+assert.equal(layout.markers[0].path, "M0,0 L0,6 L9,3 z");
+assert.equal(layout.initialArrow.label, "inicio");
+assert.equal(layout.initialArrow.markerEnd, "url(#arrow)");
+
+const byId = Object.fromEntries(layout.nodes.map((node) => [node.id, node]));
+assert.equal(byId.q0.initial, true);
+assert.equal(byId.q3.final, true);
+assert.equal(byId.q1.final, false);
+for (const node of layout.nodes) {
+  assert.equal(node.r, 28);
+  assert.ok(
+    Math.abs(
+      Math.hypot(node.x - layout.center.x, node.y - layout.center.y) -
+        layout.orbit,
+    ) < 1e-9,
+    `node ${node.id} must sit on the layout orbit`,
+  );
+}
+assert.ok(layout.orbit > layout.radius * 2);
+assert.ok(Math.abs(byId.q0.x - layout.center.x) < 1e-9);
+assert.ok(byId.q0.y < layout.center.y);
+assert.ok(layout.initialArrow.toX < byId.q0.x);
+assert.ok(Math.abs(layout.initialArrow.toY - byId.q0.y) < 1e-9);
+
+const selfLoop = layout.edges.find((edge) => edge.from === "q3" && edge.to === "q3");
+assert.equal(selfLoop.kind, "self");
+assert.equal(selfLoop.label, "b");
+assert.equal(selfLoop.markerEnd, "url(#arrow)");
+
+const forward = layout.edges.find((edge) => edge.from === "q0" && edge.to === "q1");
+const reverse = layout.edges.find((edge) => edge.from === "q1" && edge.to === "q0");
+assert.equal(forward.kind, "mutual");
+assert.equal(reverse.kind, "mutual");
+assert.notEqual(forward.offset, reverse.offset);
+
+const normal = layout.edges.find((edge) => edge.from === "q1" && edge.to === "q2");
+assert.equal(normal.kind, "normal");
+assert.equal(normal.markerEnd, "url(#arrow)");
+
+const again = mod.layoutDiagram(summary);
+assert.deepEqual(again, layout);
+console.log("diagram-layout-ok");
+"""
+
+
+DIAGRAM_LABELS_SCRIPT = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.DIAGRAM_MODULE).href);
+assert.equal(typeof mod.groupLabels, "function");
+
+const groups = mod.groupLabels([
+  { origen: "q0", simbolo: "b", destino: "q1" },
+  { origen: "q0", simbolo: "a", destino: "q1" },
+  { origen: "q0", simbolo: "a", destino: "q1" },
+  { origen: "q1", simbolo: "c", destino: "q1" },
+  { origen: "q0", simbolo: "c", destino: "q2" },
+]);
+assert.deepEqual(groups, [
+  { origen: "q0", destino: "q1", symbols: ["a", "b"], label: "(a, b)" },
+  { origen: "q1", destino: "q1", symbols: ["c"], label: "c" },
+  { origen: "q0", destino: "q2", symbols: ["c"], label: "c" },
+]);
+
+const bc = mod.groupLabels([
+  { origen: "q2", simbolo: "c", destino: "q3" },
+  { origen: "q2", simbolo: "b", destino: "q3" },
+]);
+assert.deepEqual(bc, [
+  { origen: "q2", destino: "q3", symbols: ["b", "c"], label: "(b, c)" },
+]);
+
+const single = mod.groupLabels([
+  { origen: "q0", simbolo: "a", destino: "q1" },
+]);
+assert.equal(single[0].label, "a");
+
+console.log("diagram-labels-ok");
+"""
+
+
+DIAGRAM_HIGHLIGHT_SCRIPT = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.DIAGRAM_MODULE).href);
+assert.equal(typeof mod.layoutDiagram, "function");
+assert.equal(typeof mod.highlightStep, "function");
+assert.equal(typeof mod.clearHighlight, "function");
+
+const summary = {
+  tipo: "AFD",
+  estados: ["q0", "q1", "q2", "q3"],
+  alfabeto: ["a", "b"],
+  inicial: "q0",
+  finales: ["q3"],
+  transiciones: [
+    { origen: "q0", simbolo: "a", destino: "q1" },
+    { origen: "q1", simbolo: "a", destino: "q0" },
+    { origen: "q1", simbolo: "b", destino: "q2" },
+    { origen: "q2", simbolo: "a", destino: "q3" },
+    { origen: "q3", simbolo: "a", destino: "q0" },
+    { origen: "q3", simbolo: "b", destino: "q3" },
+  ],
+};
+const layout = mod.layoutDiagram(summary);
+
+const active = mod.highlightStep(
+  layout,
+  { origen: "q0", simbolo: "a", destino: "q1", transicion_faltante: false },
+  { accepted: false },
+);
+assert.equal(active.highlight.activeNode, "q0");
+assert.deepEqual(active.highlight.activeEdge, {
+  from: "q0",
+  to: "q1",
+  label: "a",
+});
+assert.equal(active.highlight.acceptedNode, null);
+assert.equal(active.highlight.warningNode, null);
+assert.equal(active.edges.length, layout.edges.length);
+assert.equal(layout.highlight, null);
+
+const accepted = mod.highlightStep(
+  layout,
+  { origen: "q2", simbolo: "a", destino: "q3", transicion_faltante: false },
+  { accepted: true },
+);
+assert.equal(accepted.highlight.acceptedNode, "q3");
+
+const missing = mod.highlightStep(
+  layout,
+  { origen: "q1", simbolo: "z", destino: null, transicion_faltante: true },
+  { warning: true },
+);
+assert.equal(missing.highlight.warningNode, "q1");
+assert.equal(missing.highlight.activeEdge, null);
+assert.equal(missing.edges.length, layout.edges.length);
+
+const cleared = mod.clearHighlight(active);
+assert.equal(cleared.highlight, null);
+
+console.log("diagram-highlight-ok");
+"""
+
+
+DIAGRAM_SVG_SCRIPT = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.DIAGRAM_MODULE).href);
+assert.equal(typeof mod.layoutDiagram, "function");
+assert.equal(typeof mod.toSvg, "function");
+
+const summary = {
+  tipo: "AFD",
+  estados: ["q0", "q1", "q2", "q3"],
+  alfabeto: ["a", "b"],
+  inicial: "q0",
+  finales: ["q3"],
+  transiciones: [
+    { origen: "q0", simbolo: "a", destino: "q1" },
+    { origen: "q1", simbolo: "a", destino: "q0" },
+    { origen: "q1", simbolo: "b", destino: "q2" },
+    { origen: "q2", simbolo: "a", destino: "q3" },
+    { origen: "q3", simbolo: "a", destino: "q0" },
+    { origen: "q3", simbolo: "b", destino: "q3" },
+  ],
+};
+const layout = mod.layoutDiagram(summary);
+const svg = mod.toSvg(layout);
+
+assert.ok(svg.startsWith("<svg"), "toSvg() must start with <svg");
+assert.match(svg, /role="img"/);
+assert.match(svg, /<title>Diagrama del autómata<\/title>/);
+assert.match(svg, /<desc>Estados, transiciones y estado inicial\.<\/desc>/);
+assert.match(svg, /marker-end="url\(#arrow\)"/);
+
+// One outer circle per state plus one inner circle per final state.
+const circleCount = (svg.match(/<circle/g) ?? []).length;
+assert.equal(circleCount, layout.nodes.length + summary.finales.length);
+
+console.log("diagram-svg-ok");
+"""
+
+
 def test_front_alias_policy() -> None:
     result = _run_state_script(ALIAS_SCRIPT)
     _assert_node_ok(result)
@@ -372,4 +614,24 @@ def test_front_dom_helpers() -> None:
 
 def test_front_toast_aria() -> None:
     result = _run_dom_script(TOAST_SCRIPT)
+    _assert_node_ok(result)
+
+
+def test_front_diagram_layout() -> None:
+    result = _run_diagram_script(DIAGRAM_LAYOUT_SCRIPT)
+    _assert_node_ok(result)
+
+
+def test_front_diagram_labels() -> None:
+    result = _run_diagram_script(DIAGRAM_LABELS_SCRIPT)
+    _assert_node_ok(result)
+
+
+def test_front_diagram_highlight() -> None:
+    result = _run_diagram_script(DIAGRAM_HIGHLIGHT_SCRIPT)
+    _assert_node_ok(result)
+
+
+def test_front_diagram_svg() -> None:
+    result = _run_diagram_script(DIAGRAM_SVG_SCRIPT)
     _assert_node_ok(result)
