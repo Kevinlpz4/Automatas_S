@@ -8,6 +8,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 STATE_MODULE = ROOT / "web" / "js" / "state.js"
 API_MODULE = ROOT / "web" / "js" / "api.js"
+DOM_MODULE = ROOT / "web" / "js" / "dom.js"
 
 
 def _node() -> str:
@@ -44,6 +45,17 @@ def _run_state_script(script: str) -> subprocess.CompletedProcess[str]:
 
 def _run_api_script(script: str) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "API_MODULE": str(API_MODULE)}
+    return subprocess.run(
+        [_node(), "--input-type=module", "-e", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _run_dom_script(script: str) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "DOM_MODULE": str(DOM_MODULE)}
     return subprocess.run(
         [_node(), "--input-type=module", "-e", script],
         env=env,
@@ -244,6 +256,72 @@ console.log("api-error-parsing-ok");
 """
 
 
+DOM_HELPERS_SCRIPT = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const dom = await import(pathToFileURL(process.env.DOM_MODULE).href);
+assert.equal(typeof dom.el, "function");
+assert.equal(typeof dom.clear, "function");
+assert.equal(typeof dom.setText, "function");
+assert.equal(typeof dom.showToast, "function");
+assert.equal(typeof dom.errorCards, "function");
+assert.equal(typeof dom.apply, "function");
+assert.equal(typeof dom.mountToast, "function");
+
+assert.deepEqual(
+  dom.el("div", { class: "panel" }, "", [dom.el("span", {}, "hola")]),
+  {
+    tag: "div",
+    attrs: { class: "panel" },
+    text: "",
+    children: [{ tag: "span", attrs: {}, text: "hola", children: [] }],
+  },
+);
+assert.deepEqual(dom.clear(), { type: "clear" });
+assert.deepEqual(dom.setText("hola"), { type: "text", text: "hola" });
+
+const cards = dom.errorCards([
+  { codigo: "V01", mensaje: "El campo 'tipo' es obligatorio." },
+  { codigo: "V02", mensaje: "El campo 'estados' no puede estar vacío." },
+]);
+assert.equal(cards.length, 2);
+assert.equal(cards[0].tag, "article");
+assert.equal(cards[0].attrs.class, "error-card");
+assert.equal(cards[0].children[0].text, "V01");
+assert.equal(cards[0].children[1].text, "El campo 'tipo' es obligatorio.");
+assert.equal(cards[1].children[0].text, "V02");
+assert.equal(cards[1].children[1].text, "El campo 'estados' no puede estar vacío.");
+// The V-code is literal: no translation, prefix, or reformatting.
+assert.notEqual(cards[0].children[0].text, "Error V01");
+
+console.log("dom-helpers-ok");
+"""
+
+
+TOAST_SCRIPT = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const dom = await import(pathToFileURL(process.env.DOM_MODULE).href);
+assert.equal(typeof dom.showToast, "function");
+
+const toast = dom.showToast("Ejemplo cargado");
+assert.equal(toast.tag, "div");
+assert.equal(toast.attrs.class, "toast");
+assert.equal(toast.attrs.role, "status");
+assert.equal(toast.attrs["aria-live"], "polite");
+assert.equal(toast.text, "Ejemplo cargado");
+assert.equal(toast.duracionMs, 3000);
+
+const custom = dom.showToast("Archivo cargado", 1500);
+assert.equal(custom.text, "Archivo cargado");
+assert.equal(custom.duracionMs, 1500);
+
+console.log("toast-aria-ok");
+"""
+
+
 def test_front_alias_policy() -> None:
     result = _run_state_script(ALIAS_SCRIPT)
     _assert_node_ok(result)
@@ -284,4 +362,14 @@ def test_front_api_endpoints() -> None:
 
 def test_front_api_error_parsing() -> None:
     result = _run_api_script(API_ERROR_SCRIPT)
+    _assert_node_ok(result)
+
+
+def test_front_dom_helpers() -> None:
+    result = _run_dom_script(DOM_HELPERS_SCRIPT)
+    _assert_node_ok(result)
+
+
+def test_front_toast_aria() -> None:
+    result = _run_dom_script(TOAST_SCRIPT)
     _assert_node_ok(result)
