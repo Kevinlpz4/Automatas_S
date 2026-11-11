@@ -15,6 +15,7 @@ PLAYBACK_MODULE = ROOT / "web" / "js" / "playback.js"
 UPCOMING_MODULE = ROOT / "web" / "js" / "upcoming.js"
 UPCOMING_FIXTURES = ROOT / "ejemplos"
 STYLES_CSS = ROOT / "web" / "styles.css"
+INDEX_HTML = ROOT / "web" / "index.html"
 
 THEME_TOKENS = {
     "--bg": "#0b1220",
@@ -1185,10 +1186,22 @@ def test_front_reduced_motion_css() -> None:
     assert "scroll-behavior: auto !important" in reduced
 
 
-def test_front_no_build() -> None:
-    css = _css().lower()
-    assert "@import" not in css
-    assert "url(http" not in css
-    assert "//cdn" not in css
-    assert "@tailwind" not in css
-    assert "@apply" not in css
+@pytest.mark.parametrize(
+    "path",
+    [STYLES_CSS, INDEX_HTML],
+    ids=["styles", "index"],
+)
+def test_front_no_build(path: Path) -> None:
+    text = path.read_text(encoding="utf-8").lower()
+    assert "@import" not in text
+    assert "url(http" not in text
+    assert "//cdn" not in text
+    assert "@tailwind" not in text
+    assert "@apply" not in text
+    assert "http://" not in text
+    assert "https://" not in text
+    assert "fonts.googleapis.com" not in text
+    assert "fonts.gstatic.com" not in text
+    assert "cdnjs" not in text
+    assert "unpkg.com" not in text
+    assert "jsdelivr" not in text
