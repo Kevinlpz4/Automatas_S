@@ -11,6 +11,8 @@ API_MODULE = ROOT / "web" / "js" / "api.js"
 DOM_MODULE = ROOT / "web" / "js" / "dom.js"
 DIAGRAM_MODULE = ROOT / "web" / "js" / "diagram.js"
 PLAYBACK_MODULE = ROOT / "web" / "js" / "playback.js"
+UPCOMING_MODULE = ROOT / "web" / "js" / "upcoming.js"
+UPCOMING_FIXTURES = ROOT / "ejemplos"
 
 
 def _node() -> str:
@@ -80,6 +82,21 @@ def _run_diagram_script(script: str) -> subprocess.CompletedProcess[str]:
 
 def _run_playback_script(script: str) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "PLAYBACK_MODULE": str(PLAYBACK_MODULE)}
+    return subprocess.run(
+        [_node(), "--input-type=module", "-e", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _run_upcoming_script(script: str) -> subprocess.CompletedProcess[str]:
+    env = {
+        **os.environ,
+        "UPCOMING_MODULE": str(UPCOMING_MODULE),
+        "UPCOMING_FIXTURES": str(UPCOMING_FIXTURES),
+    }
     return subprocess.run(
         [_node(), "--input-type=module", "-e", script],
         env=env,
@@ -876,6 +893,127 @@ console.log("playback-reduced-stepping-ok");
 """
 
 
+UPCOMING_READ_ONLY_EXAMPLES_SCRIPT = r"""
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.UPCOMING_MODULE).href);
+assert.equal(typeof mod.buildUpcomingExamples, "function");
+
+const calls = [];
+const getEjemplo = async (nombre) => {
+  calls.push(nombre);
+  return readFile(join(process.env.UPCOMING_FIXTURES, nombre), "utf8");
+};
+
+const examples = await mod.buildUpcomingExamples({ getEjemplo });
+assert.deepEqual(calls, ["afn_ejemplo.json", "afn_lambda_ejemplo.json"]);
+assert.equal(examples.length, 2);
+
+const afn = examples[0];
+assert.equal(afn.nombre, "afn_ejemplo.json");
+assert.equal(afn.tipo, "AFN");
+assert.deepEqual(afn.estados, ["q0", "q1", "q2"]);
+assert.deepEqual(afn.alfabeto, ["a", "b"]);
+assert.deepEqual(afn.transiciones, [
+  "q0 --a--> q0, q1",
+  "q0 --b--> q0",
+  "q1 --b--> q2",
+  "q2 --a--> q2",
+  "q2 --b--> ∅",
+]);
+
+const lambda = examples[1];
+assert.equal(lambda.nombre, "afn_lambda_ejemplo.json");
+assert.equal(lambda.tipo, "AFN-λ");
+assert.deepEqual(lambda.estados, ["q0", "q1", "q2"]);
+assert.deepEqual(lambda.alfabeto, ["a", "b"]);
+assert.deepEqual(lambda.transiciones, [
+  "q0 --a--> q1",
+  "q0 --λ--> q2",
+  "q1 --b--> q2",
+  "q1 --λ--> q1",
+  "q2 --a--> q2",
+]);
+
+console.log("upcoming-read-only-examples-ok");
+"""
+
+
+UPCOMING_NO_CONTROLS_SCRIPT = r"""
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.UPCOMING_MODULE).href);
+assert.equal(typeof mod.buildUpcomingExamples, "function");
+
+const getEjemplo = async (nombre) =>
+  readFile(join(process.env.UPCOMING_FIXTURES, nombre), "utf8");
+
+const examples = await mod.buildUpcomingExamples({ getEjemplo });
+assert.equal(examples.length, 2, "expected both upcoming examples");
+
+const descriptorKeys = ["nombre", "tipo", "estados", "alfabeto", "transiciones"];
+for (const [index, example] of examples.entries()) {
+  assert.deepEqual(
+    Object.keys(example).sort(),
+    [...descriptorKeys].sort(),
+    `examples[${index}] must expose exactly the read-only descriptor keys`,
+  );
+}
+
+const controlTags = new Set(["button", "input", "select", "textarea"]);
+const controlKeys = new Set([
+  "onclick",
+  "onchange",
+  "onsubmit",
+  "oninput",
+  "data-action",
+  "data-simulate",
+  "data-validate",
+  "data-execute",
+]);
+
+function assertNoControls(value, path = "examples") {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertNoControls(item, `${path}[${index}]`));
+    return;
+  }
+  if (value === null || typeof value !== "object") {
+    return;
+  }
+  if ("tag" in value) {
+    assert.ok(
+      !controlTags.has(String(value.tag).toLowerCase()),
+      `${path}.tag must not be a control (${value.tag})`,
+    );
+  }
+  for (const [key, child] of Object.entries(value)) {
+    assert.ok(
+      !controlKeys.has(key.toLowerCase()),
+      `${path}.${key} must not be a control or event handler`,
+    );
+    assertNoControls(child, `${path}.${key}`);
+  }
+}
+
+assertNoControls(examples);
+
+const serialized = JSON.stringify(examples);
+assert.doesNotMatch(serialized, /<button/i);
+assert.doesNotMatch(serialized, /<input/i);
+assert.doesNotMatch(serialized, /<select/i);
+assert.doesNotMatch(serialized, /<textarea/i);
+assert.doesNotMatch(serialized, /onclick\s*=/i);
+
+console.log("upcoming-no-controls-ok");
+"""
+
+
 def test_front_alias_policy() -> None:
     result = _run_state_script(ALIAS_SCRIPT)
     _assert_node_ok(result)
@@ -962,3 +1100,18 @@ def test_front_reduced_motion() -> None:
 def test_front_reduced_stepping() -> None:
     result = _run_playback_script(PLAYBACK_REDUCED_STEPPING_SCRIPT)
     _assert_node_ok(result)
+
+
+def test_upcoming_read_only_examples() -> None:
+    result = _run_upcoming_script(UPCOMING_READ_ONLY_EXAMPLES_SCRIPT)
+    _assert_node_ok(result)
+
+
+def test_upcoming_no_controls() -> None:
+    result = _run_upcoming_script(UPCOMING_NO_CONTROLS_SCRIPT)
+    _assert_node_ok(result)
+    # Module contract only: the descriptor has no controls, and this module
+    # must not fetch directly. URL/error handling stays in api.getEjemplo.
+    source = UPCOMING_MODULE.read_text(encoding="utf-8")
+    assert "fetch(" not in source
+    assert "fetch (" not in source
