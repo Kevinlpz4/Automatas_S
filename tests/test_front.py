@@ -31,6 +31,53 @@ THEME_TOKENS = {
     "--warning": "#f59e0b",
 }
 
+SHELL_IDS = (
+    "sidebar",
+    "workspace",
+    "automata-types",
+    "type-afd",
+    "type-afn",
+    "type-afn-lambda",
+    "upcoming-afn",
+    "upcoming-afn-lambda",
+    "upcoming-afn-example",
+    "upcoming-afn-lambda-example",
+    "automata-comparison",
+    "input-panel",
+    "automata-editor",
+    "word-input",
+    "file-input",
+    "file-drop",
+    "example-select",
+    "validate-button",
+    "simulate-button",
+    "clear-button",
+    "summary-content",
+    "summary-status",
+    "diagram-panel",
+    "diagram",
+    "result-panel",
+    "result-content",
+    "error-cards",
+    "trace-panel",
+    "playback-controls",
+    "timeline",
+    "trace-status",
+    "play-button",
+    "pause-button",
+    "prev-button",
+    "next-button",
+    "reset-button",
+    "toast-container",
+    "sidebar-title",
+    "input-title",
+    "diagram-title",
+    "result-title",
+    "trace-title",
+    "upcoming-afn-title",
+    "upcoming-afn-lambda-title",
+)
+
 
 def _node() -> str:
     node = shutil.which("node")
@@ -1205,3 +1252,112 @@ def test_front_no_build(path: Path) -> None:
     assert "cdnjs" not in text
     assert "unpkg.com" not in text
     assert "jsdelivr" not in text
+
+
+def _html() -> str:
+    return INDEX_HTML.read_text(encoding="utf-8")
+
+
+def _id_count(html: str, element_id: str) -> int:
+    return len(re.findall(rf'\bid=["\']{re.escape(element_id)}["\']', html))
+
+
+def _section(html: str, element_id: str) -> str:
+    match = re.search(
+        rf'<section[^>]*\bid=["\']{re.escape(element_id)}["\'][^>]*>.*?</section>',
+        html,
+        re.S | re.I,
+    )
+    assert match, f"missing section #{element_id}"
+    return match.group(0)
+
+
+def test_front_html_lang() -> None:
+    html = _html()
+    assert re.search(r"<!doctype\s+html>", html, re.I)
+    assert re.search(r'<html[^>]*\blang="es"', html, re.I)
+    assert re.search(r'<meta[^>]*\bcharset="utf-8"', html, re.I)
+    viewport = re.search(r'<meta[^>]*\bname="viewport"[^>]*>', html, re.I)
+    assert viewport and "width=device-width" in viewport.group(0)
+    title = re.search(r"<title>([^<]+)</title>", html, re.I)
+    assert title
+    assert "simulador" in title.group(1).lower()
+    assert "autómata" in title.group(1).lower()
+
+
+def test_front_assets() -> None:
+    html = _html()
+    assert STYLES_CSS.exists()
+    assert re.search(
+        r'<link[^>]*\brel="stylesheet"[^>]*\bhref="/web/styles\.css"',
+        html,
+        re.I,
+    ), "missing local stylesheet link"
+    assert re.search(
+        r'<script[^>]*\btype="module"[^>]*\bsrc="/web/js/app\.js"',
+        html,
+        re.I,
+    ), "missing module script reference"
+    # T22 verifies the reference only. T23 creates app.js and verifies existence.
+
+
+def test_front_shell_ids() -> None:
+    html = _html()
+    for element_id in SHELL_IDS:
+        assert _id_count(html, element_id) == 1, (
+            f"#{element_id} must appear exactly once"
+        )
+    assert re.search(r"<main\b", html, re.I)
+    assert re.search(r'<aside[^>]*\bid="sidebar"', html, re.I)
+    for panel in ("input-panel", "diagram-panel", "result-panel", "trace-panel"):
+        assert re.search(rf'<section[^>]*\bid="{panel}"', html, re.I)
+    drop = re.search(
+        r'<label[^>]*\bid="file-drop"[^>]*>(?P<body>.*?)</label>',
+        html,
+        re.S | re.I,
+    )
+    assert drop, "file-drop must be a label container"
+    assert 'id="file-input"' in drop.group("body"), "file-input must be inside file-drop"
+
+
+def test_front_upcoming_content() -> None:
+    html = _html()
+    for tipo in ("AFD", "AFN", "AFN-λ"):
+        assert tipo in html
+    afn = _section(html, "upcoming-afn")
+    afn_lambda = _section(html, "upcoming-afn-lambda")
+    for body in (afn, afn_lambda):
+        assert "Próximamente" in body
+        assert "M = (Q, Σ, δ, q₀, F)" in body
+    assert "δ: Q × Σ → P(Q)" in afn
+    assert "δ: Q × (Σ ∪ {λ}) → P(Q)" in afn_lambda
+    assert "λ-clausura" in afn_lambda
+    comparison = re.search(
+        r'<table[^>]*\bid="automata-comparison"[^>]*>(?P<body>.*?)</table>',
+        html,
+        re.S | re.I,
+    )
+    assert comparison, "missing comparison table"
+    table = comparison.group("body")
+    for tipo in ("AFD", "AFN", "AFN-λ"):
+        assert tipo in table
+    for example_id in ("upcoming-afn-example", "upcoming-afn-lambda-example"):
+        assert _id_count(html, example_id) == 1
+    assert html.count('data-readonly="true"') == 2
+
+
+def test_front_upcoming_no_controls_html() -> None:
+    html = _html()
+    forbidden_tags = re.compile(r"<\s*(button|select|input|textarea|a|form)\b", re.I)
+    forbidden_attrs = re.compile(
+        r"(role=[\"'](?:button|link)[\"']"
+        r"|onclick\s*="
+        r"|contenteditable\s*="
+        r"|data-(?:simulate|validate|execute)\b"
+        r"|tabindex\s*=)",
+        re.I,
+    )
+    for section_id in ("upcoming-afn", "upcoming-afn-lambda"):
+        body = _section(html, section_id)
+        assert not forbidden_tags.search(body), f"control tag inside #{section_id}"
+        assert not forbidden_attrs.search(body), f"control attribute inside #{section_id}"

@@ -1,2 +1,139 @@
 <!doctype html>
-<html></html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Simulador de autómatas</title>
+  <link rel="stylesheet" href="/web/styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <h1>Simulador de autómatas</h1>
+    <p>Validá y simulá autómatas finitos deterministas.</p>
+  </header>
+
+  <main>
+    <aside id="sidebar" class="sidebar" aria-labelledby="sidebar-title">
+      <h2 id="sidebar-title">Tipos de autómata</h2>
+      <ul id="automata-types" class="automata-types">
+        <li id="type-afd" class="type-card">
+          <h3>AFD</h3>
+          <span class="badge badge-available">Disponible</span>
+          <p>Autómata finito determinista. Una transición por símbolo y estado.</p>
+        </li>
+        <li id="type-afn" class="type-card">
+          <h3>AFN</h3>
+          <section id="upcoming-afn" class="upcoming" aria-labelledby="upcoming-afn-title">
+            <h4 id="upcoming-afn-title">AFN</h4>
+            <span class="badge badge-upcoming">Próximamente</span>
+            <p>Autómata finito no determinista. Cada transición puede llevar a un conjunto de estados.</p>
+            <p><code>M = (Q, Σ, δ, q₀, F)</code></p>
+            <p><code>δ: Q × Σ → P(Q)</code></p>
+            <p>El conjunto de estados finales F determina la aceptación.</p>
+            <div id="upcoming-afn-example" class="upcoming-example" data-readonly="true" aria-live="polite"></div>
+          </section>
+        </li>
+        <li id="type-afn-lambda" class="type-card">
+          <h3>AFN-λ</h3>
+          <section id="upcoming-afn-lambda" class="upcoming" aria-labelledby="upcoming-afn-lambda-title">
+            <h4 id="upcoming-afn-lambda-title">AFN-λ</h4>
+            <span class="badge badge-upcoming">Próximamente</span>
+            <p>Autómata finito no determinista con transiciones λ. La λ-clausura permite cambiar de estado sin consumir símbolos.</p>
+            <p><code>M = (Q, Σ, δ, q₀, F)</code></p>
+            <p><code>δ: Q × (Σ ∪ {λ}) → P(Q)</code></p>
+            <p>La λ-clausura de un estado incluye todos los estados alcanzables por transiciones λ.</p>
+            <div id="upcoming-afn-lambda-example" class="upcoming-example" data-readonly="true" aria-live="polite"></div>
+          </section>
+        </li>
+      </ul>
+    </aside>
+
+    <div id="workspace" class="workspace">
+      <section id="input-panel" class="panel" aria-labelledby="input-title">
+        <h2 id="input-title">Autómata</h2>
+        <label for="automata-editor">Definición del autómata</label>
+        <textarea id="automata-editor" name="automata" rows="12" spellcheck="false"></textarea>
+
+        <label for="word-input">Palabra</label>
+        <input id="word-input" name="palabra" type="text" autocomplete="off">
+
+        <label id="file-input-label" for="file-input">Archivo JSON</label>
+        <label id="file-drop" class="drop-zone" for="file-input">
+          <span>Arrastrá un archivo JSON o elegilo.</span>
+          <input id="file-input" name="archivo" type="file" accept=".json,application/json">
+        </label>
+
+        <label for="example-select">Ejemplo</label>
+        <select id="example-select" name="ejemplo"></select>
+
+        <div class="actions">
+          <button id="validate-button" type="button">Validar</button>
+          <button id="simulate-button" type="button" disabled>Simular</button>
+          <button id="clear-button" type="button">Limpiar</button>
+        </div>
+
+        <div id="summary-content" class="summary" aria-live="polite"></div>
+        <div id="summary-status" class="summary-status" role="status"></div>
+      </section>
+
+      <section id="diagram-panel" class="panel" aria-labelledby="diagram-title">
+        <h2 id="diagram-title">Diagrama</h2>
+        <div id="diagram" class="diagram" role="img" aria-label="Diagrama del autómata"></div>
+      </section>
+
+      <section id="result-panel" class="panel" aria-labelledby="result-title">
+        <h2 id="result-title">Resultado</h2>
+        <div id="result-content" class="result" aria-live="polite"></div>
+        <div id="error-cards" class="errors" aria-live="assertive"></div>
+      </section>
+
+      <section id="trace-panel" class="panel" aria-labelledby="trace-title">
+        <h2 id="trace-title">Traza</h2>
+        <div id="playback-controls" class="playback-controls">
+          <button id="play-button" type="button">Reproducir</button>
+          <button id="pause-button" type="button">Pausar</button>
+          <button id="prev-button" type="button">Paso anterior</button>
+          <button id="next-button" type="button">Paso siguiente</button>
+          <button id="reset-button" type="button">Reiniciar</button>
+        </div>
+        <ol id="timeline" class="timeline"></ol>
+        <div id="trace-status" class="trace-status" role="status"></div>
+      </section>
+
+      <section id="comparison-panel" class="panel" aria-labelledby="comparison-title">
+        <h2 id="comparison-title">Comparación de tipos de autómata</h2>
+        <table id="automata-comparison" class="comparison-table">
+          <caption>AFD, AFN y AFN-λ</caption>
+          <thead>
+            <tr>
+              <th scope="col">Tipo</th>
+              <th scope="col">Determinismo</th>
+              <th scope="col">Transiciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">AFD</th>
+              <td>Determinista</td>
+              <td>Una por símbolo</td>
+            </tr>
+            <tr>
+              <th scope="row">AFN</th>
+              <td>No determinista</td>
+              <td>Conjunto de destinos</td>
+            </tr>
+            <tr>
+              <th scope="row">AFN-λ</th>
+              <td>No determinista</td>
+              <td>Conjunto de destinos y λ</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+    </div>
+  </main>
+
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
+  <script type="module" src="/web/js/app.js"></script>
+</body>
+</html>
