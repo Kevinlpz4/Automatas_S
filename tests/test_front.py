@@ -13,6 +13,8 @@ DOM_MODULE = ROOT / "web" / "js" / "dom.js"
 DIAGRAM_MODULE = ROOT / "web" / "js" / "diagram.js"
 PLAYBACK_MODULE = ROOT / "web" / "js" / "playback.js"
 UPCOMING_MODULE = ROOT / "web" / "js" / "upcoming.js"
+APP_LOGIC_MODULE = ROOT / "web" / "js" / "app_logic.js"
+APP_MODULE = ROOT / "web" / "js" / "app.js"
 UPCOMING_FIXTURES = ROOT / "ejemplos"
 STYLES_CSS = ROOT / "web" / "styles.css"
 INDEX_HTML = ROOT / "web" / "index.html"
@@ -161,6 +163,17 @@ def _run_upcoming_script(script: str) -> subprocess.CompletedProcess[str]:
         "UPCOMING_MODULE": str(UPCOMING_MODULE),
         "UPCOMING_FIXTURES": str(UPCOMING_FIXTURES),
     }
+    return subprocess.run(
+        [_node(), "--input-type=module", "-e", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _run_app_logic_script(script: str) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "APP_LOGIC_MODULE": str(APP_LOGIC_MODULE)}
     return subprocess.run(
         [_node(), "--input-type=module", "-e", script],
         env=env,
@@ -1078,6 +1091,109 @@ console.log("upcoming-no-controls-ok");
 """
 
 
+APP_BOOTSTRAP_SCRIPT = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.APP_LOGIC_MODULE).href);
+
+assert.equal(typeof mod.buildTypeCards, "function");
+assert.equal(typeof mod.buildExampleOptions, "function");
+assert.equal(typeof mod.selectInitialExample, "function");
+assert.equal(typeof mod.loadBootstrap, "function");
+
+const tipos = [
+  { tipo: "AFD", estado: "disponible" },
+  { tipo: "AFN", estado: "proximamente" },
+  { tipo: "AFN-λ", estado: "proximamente" },
+];
+const ejemplos = [
+  { nombre: "afd_ejemplo.json", tipo: "AFD" },
+  { nombre: "afd_incompleto.json", tipo: "AFD" },
+  { nombre: "afn_ejemplo.json", tipo: "AFN" },
+  { nombre: "afn_lambda_ejemplo.json", tipo: "AFN-λ" },
+];
+
+assert.deepEqual(mod.buildTypeCards(tipos), [
+  { id: "type-afd", tipo: "AFD", estado: "disponible", badge: "Disponible" },
+  { id: "type-afn", tipo: "AFN", estado: "proximamente", badge: "Próximamente" },
+  {
+    id: "type-afn-lambda",
+    tipo: "AFN-λ",
+    estado: "proximamente",
+    badge: "Próximamente",
+  },
+]);
+
+assert.deepEqual(mod.buildExampleOptions(ejemplos), [
+  { value: "afd_ejemplo.json", label: "afd_ejemplo.json (AFD)" },
+  { value: "afd_incompleto.json", label: "afd_incompleto.json (AFD)" },
+  { value: "afn_ejemplo.json", label: "afn_ejemplo.json (AFN)" },
+  {
+    value: "afn_lambda_ejemplo.json",
+    label: "afn_lambda_ejemplo.json (AFN-λ)",
+  },
+]);
+
+assert.equal(mod.selectInitialExample(ejemplos), "afd_ejemplo.json");
+assert.equal(
+  mod.selectInitialExample([
+    { nombre: "afn_ejemplo.json", tipo: "AFN" },
+    { nombre: "afd_ejemplo.json", tipo: "AFD" },
+  ]),
+  "afd_ejemplo.json",
+  "bootstrap must prefer the first AFD example",
+);
+assert.equal(
+  mod.selectInitialExample([{ nombre: "afn_ejemplo.json", tipo: "AFN" }]),
+  null,
+  "no AFD means no initial example",
+);
+assert.equal(mod.selectInitialExample([]), null);
+
+const calls = [];
+const texto =
+  '{"tipo":"AFD","estados":["q0"],"alfabeto":["a"],"inicial":"q0","finales":["q0"],"transiciones":{}}';
+const plan = await mod.loadBootstrap({
+  getTipos: async () => {
+    calls.push("tipos");
+    return tipos;
+  },
+  getEjemplos: async () => {
+    calls.push("ejemplos");
+    return ejemplos;
+  },
+  getEjemplo: async (nombre) => {
+    calls.push(`ejemplo:${nombre}`);
+    return texto;
+  },
+});
+
+assert.deepEqual(calls, ["tipos", "ejemplos", "ejemplo:afd_ejemplo.json"]);
+assert.deepEqual(plan.typeCards, mod.buildTypeCards(tipos));
+assert.deepEqual(plan.exampleOptions, mod.buildExampleOptions(ejemplos));
+assert.equal(plan.selectedExample, "afd_ejemplo.json");
+assert.equal(plan.editorText, texto);
+
+const emptyCalls = [];
+const emptyPlan = await mod.loadBootstrap({
+  getTipos: async () => tipos,
+  getEjemplos: async () => [],
+  getEjemplo: async (nombre) => {
+    emptyCalls.push(nombre);
+    return "no debe llamarse";
+  },
+});
+
+assert.deepEqual(emptyCalls, []);
+assert.deepEqual(emptyPlan.exampleOptions, []);
+assert.equal(emptyPlan.selectedExample, null);
+assert.equal(emptyPlan.editorText, "");
+
+console.log("app-bootstrap-ok");
+"""
+
+
 def test_front_alias_policy() -> None:
     result = _run_state_script(ALIAS_SCRIPT)
     _assert_node_ok(result)
@@ -1177,6 +1293,31 @@ def test_upcoming_no_controls() -> None:
     # Module contract only: the descriptor has no controls, and this module
     # must not fetch directly. URL/error handling stays in api.getEjemplo.
     source = UPCOMING_MODULE.read_text(encoding="utf-8")
+    assert "fetch(" not in source
+    assert "fetch (" not in source
+
+
+def test_front_app_bootstrap_plan() -> None:
+    result = _run_app_logic_script(APP_BOOTSTRAP_SCRIPT)
+    _assert_node_ok(result)
+
+
+def test_front_app_logic_is_pure() -> None:
+    source = APP_LOGIC_MODULE.read_text(encoding="utf-8")
+    assert "api.js" not in source
+    assert "dom.js" not in source
+    assert "document." not in source
+    assert "window." not in source
+    assert "fetch(" not in source
+    assert "fetch (" not in source
+
+
+def test_front_app_bootstrap_wiring() -> None:
+    source = APP_MODULE.read_text(encoding="utf-8")
+    assert 'import * as api from "./api.js"' in source
+    assert 'import { loadBootstrap } from "./app_logic.js"' in source
+    for name in ("getTipos", "getEjemplos", "getEjemplo"):
+        assert f"{name}: api.{name}" in source
     assert "fetch(" not in source
     assert "fetch (" not in source
 
