@@ -1194,6 +1194,148 @@ console.log("app-bootstrap-ok");
 """
 
 
+APP_GATING_VIEW_SCRIPT = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.APP_LOGIC_MODULE).href);
+assert.equal(typeof mod.buildGatingView, "function");
+
+const cases = [
+  {
+    name: "sin summary",
+    state: { summary: null, simularHabilitado: false },
+    expected: { simulateDisabled: true, notice: null },
+  },
+  {
+    name: "sin summary con habilitado viejo",
+    state: { summary: null, simularHabilitado: true },
+    expected: { simulateDisabled: true, notice: null },
+  },
+  {
+    name: "AFD válido",
+    state: { summary: { tipo: "AFD" }, simularHabilitado: true },
+    expected: { simulateDisabled: false, notice: null },
+  },
+  {
+    name: "AFD válido con habilitado viejo en false",
+    state: { summary: { tipo: "AFD" }, simularHabilitado: false },
+    expected: { simulateDisabled: true, notice: null },
+  },
+  {
+    name: "AFN válido",
+    state: { summary: { tipo: "AFN" }, simularHabilitado: false },
+    expected: { simulateDisabled: true, notice: "Próximamente" },
+  },
+  {
+    name: "AFN-λ válido",
+    state: { summary: { tipo: "AFN-λ" }, simularHabilitado: false },
+    expected: { simulateDisabled: true, notice: "Próximamente" },
+  },
+  {
+    name: "tipo desconocido sin aviso",
+    state: { summary: { tipo: "FUTURO" }, simularHabilitado: false },
+    expected: { simulateDisabled: true, notice: null },
+  },
+];
+
+for (const { name, state, expected } of cases) {
+  assert.deepEqual(mod.buildGatingView(state), expected, name);
+}
+
+console.log("app-gating-view-ok");
+"""
+
+
+APP_INVALIDATION_ORDER_SCRIPT = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.APP_LOGIC_MODULE).href);
+assert.equal(typeof mod.createInvalidationHandlers, "function");
+
+function makeHandlers() {
+  const calls = [];
+  const received = { readFile: [], loadExample: [] };
+  const handlers = mod.createInvalidationHandlers({
+    invalidate: () => calls.push("invalidate"),
+    readFile: (file) => {
+      calls.push("readFile");
+      received.readFile.push(file);
+      return Promise.resolve(`texto:${file.name}`);
+    },
+    loadExample: (nombre) => {
+      calls.push("loadExample");
+      received.loadExample.push(nombre);
+      return Promise.resolve(`ejemplo:${nombre}`);
+    },
+  });
+  return { handlers, calls, received };
+}
+
+// Editor
+{
+  const { handlers, calls } = makeHandlers();
+  handlers.onEditorInput();
+  assert.deepEqual(calls, ["invalidate"], "editor must invalidate first");
+}
+
+// File: the handler must receive the File object, not file.name.
+{
+  const { handlers, calls, received } = makeHandlers();
+  const file = { name: "archivo.json", kind: "file" };
+  const result = await handlers.onFileChange(file);
+  assert.deepEqual(
+    calls,
+    ["invalidate", "readFile"],
+    "file must invalidate before reading",
+  );
+  assert.equal(received.readFile.length, 1);
+  assert.equal(
+    received.readFile[0],
+    file,
+    "readFile must receive the same File object, not its name",
+  );
+  assert.equal(result, "texto:archivo.json");
+}
+
+// Drop: same readFile path, same File-object contract.
+{
+  const { handlers, calls, received } = makeHandlers();
+  const file = { name: "drop.json", kind: "file" };
+  const result = await handlers.onDrop(file);
+  assert.deepEqual(
+    calls,
+    ["invalidate", "readFile"],
+    "drop must invalidate before reading",
+  );
+  assert.equal(received.readFile.length, 1);
+  assert.equal(
+    received.readFile[0],
+    file,
+    "onDrop must pass the same File object to readFile",
+  );
+  assert.equal(result, "texto:drop.json");
+}
+
+// Example
+{
+  const { handlers, calls, received } = makeHandlers();
+  const result = await handlers.onExampleChange("afd_ejemplo.json");
+  assert.deepEqual(
+    calls,
+    ["invalidate", "loadExample"],
+    "example must invalidate before loading",
+  );
+  assert.equal(received.loadExample.length, 1);
+  assert.equal(received.loadExample[0], "afd_ejemplo.json");
+  assert.equal(result, "ejemplo:afd_ejemplo.json");
+}
+
+console.log("app-invalidation-order-ok");
+"""
+
+
 def test_front_alias_policy() -> None:
     result = _run_state_script(ALIAS_SCRIPT)
     _assert_node_ok(result)
@@ -1315,11 +1457,57 @@ def test_front_app_logic_is_pure() -> None:
 def test_front_app_bootstrap_wiring() -> None:
     source = APP_MODULE.read_text(encoding="utf-8")
     assert 'import * as api from "./api.js"' in source
-    assert 'import { loadBootstrap } from "./app_logic.js"' in source
+    assert re.search(
+        r'import\s*\{[^}]*\bloadBootstrap\b[^}]*\}\s*from\s*"\./app_logic\.js"',
+        source,
+    ), "app.js must import loadBootstrap from app_logic.js"
     for name in ("getTipos", "getEjemplos", "getEjemplo"):
         assert f"{name}: api.{name}" in source
     assert "fetch(" not in source
     assert "fetch (" not in source
+
+
+def test_front_app_gating_view() -> None:
+    result = _run_app_logic_script(APP_GATING_VIEW_SCRIPT)
+    _assert_node_ok(result)
+
+
+def test_front_app_invalidation_order() -> None:
+    result = _run_app_logic_script(APP_INVALIDATION_ORDER_SCRIPT)
+    _assert_node_ok(result)
+
+
+def test_front_app_gating_wiring() -> None:
+    source = APP_MODULE.read_text(encoding="utf-8")
+    for name in ("buildGatingView", "createInvalidationHandlers"):
+        assert re.search(
+            rf'import\s*\{{[^}}]*\b{name}\b[^}}]*\}}\s*from\s*"\./app_logic\.js"',
+            source,
+        ), f"app.js must import {name} from app_logic.js"
+    for name in ("invalidate", "setSummary"):
+        assert re.search(
+            rf'import\s*\{{[^}}]*\b{name}\b[^}}]*\}}\s*from\s*"\./state\.js"',
+            source,
+        ), f"app.js must import {name} from state.js"
+    assert "const invalidation = createInvalidationHandlers({" in source
+    assert "const view = buildGatingView(state);" in source
+    for event in (
+        'byId("automata-editor").addEventListener("input"',
+        'byId("file-input").addEventListener("change"',
+        'byId("file-drop").addEventListener("drop"',
+        'byId("example-select").addEventListener("change"',
+        'byId("validate-button").addEventListener("click"',
+    ):
+        assert event in source, f"missing DOM event wiring: {event}"
+    for handler in (
+        "invalidation.onEditorInput()",
+        "invalidation.onFileChange(file)",
+        "invalidation.onDrop(file)",
+        "invalidation.onExampleChange(nombre)",
+    ):
+        assert handler in source, f"missing invalidation handler: {handler}"
+    assert 'byId("simulate-button").disabled = view.simulateDisabled' in source
+    assert "status.textContent = view.notice" in source
 
 
 def _css() -> str:

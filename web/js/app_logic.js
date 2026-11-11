@@ -43,3 +43,42 @@ export async function loadBootstrap({ getTipos, getEjemplos, getEjemplo }) {
     editorText,
   };
 }
+
+const NON_AFD_NOTICE = Object.freeze({
+  AFN: "Próximamente",
+  "AFN-λ": "Próximamente",
+});
+
+export function buildGatingView(state) {
+  const hasSummary = state.summary !== null && state.summary !== undefined;
+  const simulateDisabled = !hasSummary || !state.simularHabilitado;
+  const notice = hasSummary
+    ? (NON_AFD_NOTICE[state.summary.tipo] ?? null)
+    : null;
+
+  return { simulateDisabled, notice };
+}
+
+export function createInvalidationHandlers({
+  invalidate,
+  readFile,
+  loadExample,
+}) {
+  return {
+    onEditorInput() {
+      invalidate();
+    },
+    onFileChange(file) {
+      invalidate();
+      return readFile(file);
+    },
+    onDrop(file) {
+      invalidate();
+      return readFile(file);
+    },
+    onExampleChange(nombre) {
+      invalidate();
+      return loadExample(nombre);
+    },
+  };
+}
