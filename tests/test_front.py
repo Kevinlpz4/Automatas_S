@@ -10,6 +10,7 @@ STATE_MODULE = ROOT / "web" / "js" / "state.js"
 API_MODULE = ROOT / "web" / "js" / "api.js"
 DOM_MODULE = ROOT / "web" / "js" / "dom.js"
 DIAGRAM_MODULE = ROOT / "web" / "js" / "diagram.js"
+PLAYBACK_MODULE = ROOT / "web" / "js" / "playback.js"
 
 
 def _node() -> str:
@@ -68,6 +69,17 @@ def _run_dom_script(script: str) -> subprocess.CompletedProcess[str]:
 
 def _run_diagram_script(script: str) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "DIAGRAM_MODULE": str(DIAGRAM_MODULE)}
+    return subprocess.run(
+        [_node(), "--input-type=module", "-e", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _run_playback_script(script: str) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "PLAYBACK_MODULE": str(PLAYBACK_MODULE)}
     return subprocess.run(
         [_node(), "--input-type=module", "-e", script],
         env=env,
@@ -564,6 +576,306 @@ console.log("diagram-svg-ok");
 """
 
 
+PLAYBACK_CONTROLS_SCRIPT = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLAYBACK_MODULE).href);
+assert.equal(typeof mod.createPlayback, "function");
+
+const steps = [
+  { paso: 1, origen: "q0", simbolo: "a", destino: "q1", transicion_faltante: false },
+  { paso: 2, origen: "q1", simbolo: "b", destino: "q2", transicion_faltante: false },
+  { paso: 3, origen: "q2", simbolo: "a", destino: "q3", transicion_faltante: false },
+];
+const stepsBefore = JSON.parse(JSON.stringify(steps));
+
+function fakeScheduler() {
+  const calls = [];
+  const cancelled = [];
+  return {
+    calls,
+    cancelled,
+    schedule(callback, intervalMs) {
+      const handle = Object.freeze({
+        kind: "timeout",
+        id: calls.length + 1,
+        token: Symbol("timeout"),
+      });
+      calls.push({ callback, intervalMs, handle });
+      return handle;
+    },
+    cancel(handle) {
+      cancelled.push(handle);
+    },
+  };
+}
+
+function makePlayback(fake, onStep = () => {}) {
+  return mod.createPlayback(steps, {
+    schedule: fake.schedule,
+    cancel: fake.cancel,
+    onStep,
+  });
+}
+
+// Idle state and bounds.
+{
+  const fake = fakeScheduler();
+  const playback = makePlayback(fake);
+  const state = playback.getState();
+  assert.equal(state.status, "idle");
+  assert.equal(state.index, -1);
+  assert.equal(state.activeStep, null);
+  assert.equal(state.canPrev, false);
+  assert.equal(state.canNext, true);
+}
+
+// play() emits step 0 and schedules with the explicit default interval.
+{
+  const fake = fakeScheduler();
+  const emitted = [];
+  const playback = makePlayback(fake, (step, state) => emitted.push({ step, state }));
+  playback.play();
+
+  assert.equal(playback.getState().status, "playing");
+  assert.equal(playback.getState().index, 0);
+  assert.deepEqual(playback.getState().activeStep, steps[0]);
+  assert.equal(fake.calls.length, 1);
+  assert.equal(fake.calls[0].intervalMs, 500);
+  assert.equal(typeof fake.calls[0].callback, "function");
+  assert.equal(typeof fake.calls[0].handle, "object");
+  assert.deepEqual(emitted.at(-1).step, steps[0]);
+
+  // One tick advances one step; the same interval callback is reused.
+  fake.calls[0].callback();
+  assert.equal(playback.getState().status, "playing");
+  assert.equal(playback.getState().index, 1);
+  assert.deepEqual(playback.getState().activeStep, steps[1]);
+  assert.deepEqual(emitted.at(-1).step, steps[1]);
+
+  // Reaching the last step finishes and cancels the opaque handle.
+  fake.calls[0].callback();
+  assert.equal(playback.getState().status, "finished");
+  assert.equal(playback.getState().index, 2);
+  assert.equal(playback.getState().canNext, false);
+  assert.deepEqual(playback.getState().activeStep, steps[2]);
+  assert.deepEqual(emitted.at(-1).step, steps[2]);
+  assert.equal(fake.cancelled.length, 1);
+  assert.equal(fake.cancelled[0], fake.calls[0].handle);
+}
+
+// pause() cancels without changing the active step.
+{
+  const fake = fakeScheduler();
+  const playback = makePlayback(fake);
+  playback.play();
+  const handle = fake.calls[0].handle;
+  playback.pause();
+  assert.equal(playback.getState().status, "paused");
+  assert.equal(playback.getState().index, 0);
+  assert.equal(fake.cancelled.length, 1);
+  assert.equal(fake.cancelled[0], handle);
+}
+
+// next()/prev() are stepwise, pause playback, and clamp at bounds.
+{
+  const fake = fakeScheduler();
+  const emitted = [];
+  const playback = makePlayback(fake, (step, state) => emitted.push({ step, state }));
+  playback.next();
+  assert.equal(playback.getState().status, "paused");
+  assert.equal(playback.getState().index, 0);
+  assert.equal(playback.getState().canPrev, false);
+
+  playback.next();
+  assert.equal(playback.getState().index, 1);
+  playback.next();
+  assert.equal(playback.getState().index, 2);
+  assert.equal(playback.getState().status, "finished");
+  assert.equal(playback.getState().canNext, false);
+
+  const emittedAtLast = emitted.length;
+  playback.next();
+  assert.equal(playback.getState().index, 2);
+  assert.equal(playback.getState().status, "finished");
+  assert.equal(
+    emitted.length,
+    emittedAtLast,
+    "next() at the last step must not advance or emit again",
+  );
+
+  playback.prev();
+  assert.equal(playback.getState().status, "paused");
+  assert.equal(playback.getState().index, 1);
+  playback.prev();
+  assert.equal(playback.getState().index, 0);
+  assert.equal(playback.getState().canPrev, false);
+
+  const emittedAtFirst = emitted.length;
+  playback.prev();
+  assert.equal(playback.getState().index, 0);
+  assert.equal(
+    emitted.length,
+    emittedAtFirst,
+    "prev() at the first step must not move or emit again",
+  );
+
+  playback.reset();
+  assert.equal(playback.getState().status, "idle");
+  assert.equal(playback.getState().index, -1);
+  assert.equal(playback.getState().activeStep, null);
+  assert.equal(playback.getState().canPrev, false);
+  assert.equal(playback.getState().canNext, true);
+}
+
+// play() after pause schedules again with 500.
+{
+  const fake = fakeScheduler();
+  const playback = makePlayback(fake);
+  playback.play();
+  playback.pause();
+  playback.play();
+  assert.equal(fake.calls.length, 2);
+  assert.equal(fake.calls[1].intervalMs, 500);
+}
+
+assert.deepEqual(steps, stepsBefore, "createPlayback must not mutate the steps array");
+
+// Labels are presentation constants; checked after behavior so the Red fails
+// on controller behavior, not on the existence of the constant.
+assert.equal(typeof mod.PLAYBACK_LABELS, "object");
+assert.deepEqual(mod.PLAYBACK_LABELS, {
+  play: "Reproducir",
+  pause: "Pausar",
+  next: "Paso siguiente",
+  prev: "Paso anterior",
+  reset: "Reiniciar",
+});
+assert.ok(Object.isFrozen(mod.PLAYBACK_LABELS));
+
+console.log("playback-controls-ok");
+"""
+
+
+PLAYBACK_REDUCED_MOTION_SCRIPT = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLAYBACK_MODULE).href);
+assert.equal(typeof mod.createPlayback, "function");
+
+const steps = [
+  { paso: 1, origen: "q0", simbolo: "a", destino: "q1", transicion_faltante: false },
+  { paso: 2, origen: "q1", simbolo: "b", destino: "q2", transicion_faltante: false },
+  { paso: 3, origen: "q2", simbolo: "a", destino: "q3", transicion_faltante: false },
+];
+const stepsBefore = JSON.parse(JSON.stringify(steps));
+
+const calls = [];
+const cancelled = [];
+const emitted = [];
+const playback = mod.createPlayback(steps, {
+  reducedMotion: true,
+  schedule(callback, intervalMs) {
+    calls.push({ callback, intervalMs });
+    return { kind: "timeout", id: calls.length };
+  },
+  cancel(handle) {
+    cancelled.push(handle);
+  },
+  onStep(step, state) {
+    emitted.push({ step, state });
+  },
+});
+
+playback.play();
+assert.equal(calls.length, 0, "reduced motion must not schedule a timer");
+assert.equal(cancelled.length, 0, "reduced motion must not cancel a timer");
+assert.equal(playback.getState().status, "finished");
+assert.equal(playback.getState().index, 2);
+assert.deepEqual(playback.getState().activeStep, steps[2]);
+assert.deepEqual(emitted.at(-1).step, steps[2], "reduced motion must emit the last step");
+assert.equal(emitted.at(-1).state.status, "finished");
+assert.deepEqual(steps, stepsBefore, "createPlayback must not mutate the steps array");
+
+console.log("playback-reduced-motion-ok");
+"""
+
+
+PLAYBACK_REDUCED_STEPPING_SCRIPT = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLAYBACK_MODULE).href);
+assert.equal(typeof mod.createPlayback, "function");
+
+const steps = [
+  { paso: 1, origen: "q0", simbolo: "a", destino: "q1", transicion_faltante: false },
+  { paso: 2, origen: "q1", simbolo: "b", destino: "q2", transicion_faltante: false },
+  { paso: 3, origen: "q2", simbolo: "a", destino: "q3", transicion_faltante: false },
+];
+const stepsBefore = JSON.parse(JSON.stringify(steps));
+
+const calls = [];
+const emitted = [];
+const playback = mod.createPlayback(steps, {
+  reducedMotion: true,
+  schedule(callback, intervalMs) {
+    calls.push({ callback, intervalMs });
+    return { kind: "timeout", id: calls.length };
+  },
+  cancel() {},
+  onStep(step, state) {
+    emitted.push({ step, state });
+  },
+});
+
+playback.reset();
+assert.equal(playback.getState().status, "idle");
+
+playback.next();
+assert.equal(playback.getState().index, 0);
+assert.equal(playback.getState().status, "paused");
+
+playback.next();
+assert.equal(playback.getState().index, 1);
+playback.next();
+assert.equal(playback.getState().index, 2);
+assert.equal(playback.getState().status, "finished");
+
+const emittedAtLast = emitted.length;
+playback.next();
+assert.equal(playback.getState().index, 2);
+assert.equal(playback.getState().status, "finished");
+assert.equal(
+  emitted.length,
+  emittedAtLast,
+  "next() at the last step must not advance or emit again",
+);
+
+playback.prev();
+assert.equal(playback.getState().index, 1);
+assert.equal(playback.getState().status, "paused");
+playback.prev();
+assert.equal(playback.getState().index, 0);
+
+const emittedAtFirst = emitted.length;
+playback.prev();
+assert.equal(playback.getState().index, 0);
+assert.equal(
+  emitted.length,
+  emittedAtFirst,
+  "prev() at the first step must not move or emit again",
+);
+
+assert.equal(calls.length, 0, "manual stepping must not schedule a timer");
+assert.deepEqual(steps, stepsBefore, "createPlayback must not mutate the steps array");
+
+console.log("playback-reduced-stepping-ok");
+"""
+
+
 def test_front_alias_policy() -> None:
     result = _run_state_script(ALIAS_SCRIPT)
     _assert_node_ok(result)
@@ -634,4 +946,19 @@ def test_front_diagram_highlight() -> None:
 
 def test_front_diagram_svg() -> None:
     result = _run_diagram_script(DIAGRAM_SVG_SCRIPT)
+    _assert_node_ok(result)
+
+
+def test_front_playback_controls() -> None:
+    result = _run_playback_script(PLAYBACK_CONTROLS_SCRIPT)
+    _assert_node_ok(result)
+
+
+def test_front_reduced_motion() -> None:
+    result = _run_playback_script(PLAYBACK_REDUCED_MOTION_SCRIPT)
+    _assert_node_ok(result)
+
+
+def test_front_reduced_stepping() -> None:
+    result = _run_playback_script(PLAYBACK_REDUCED_STEPPING_SCRIPT)
     _assert_node_ok(result)
