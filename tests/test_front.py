@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -13,6 +14,21 @@ DIAGRAM_MODULE = ROOT / "web" / "js" / "diagram.js"
 PLAYBACK_MODULE = ROOT / "web" / "js" / "playback.js"
 UPCOMING_MODULE = ROOT / "web" / "js" / "upcoming.js"
 UPCOMING_FIXTURES = ROOT / "ejemplos"
+STYLES_CSS = ROOT / "web" / "styles.css"
+
+THEME_TOKENS = {
+    "--bg": "#0b1220",
+    "--surface": "#111a2b",
+    "--surface-2": "#18243a",
+    "--border": "#26364f",
+    "--text": "#e6edf7",
+    "--text-muted": "#9fb0c8",
+    "--accent": "#22d3ee",
+    "--blue": "#3b82f6",
+    "--success": "#22c55e",
+    "--danger": "#ef4444",
+    "--warning": "#f59e0b",
+}
 
 
 def _node() -> str:
@@ -1115,3 +1131,64 @@ def test_upcoming_no_controls() -> None:
     source = UPCOMING_MODULE.read_text(encoding="utf-8")
     assert "fetch(" not in source
     assert "fetch (" not in source
+
+
+def _css() -> str:
+    return STYLES_CSS.read_text(encoding="utf-8")
+
+
+def _css_block(css: str, header: str) -> str:
+    match = re.search(rf"{re.escape(header)}\s*\{{(?P<body>.*?)\n\}}", css, re.S)
+    assert match, f"missing CSS block: {header}"
+    return match.group("body")
+
+
+def test_front_theme_tokens() -> None:
+    root = _css_block(_css(), ":root")
+    for token, value in THEME_TOKENS.items():
+        assert re.search(
+            rf"{re.escape(token)}\s*:\s*{re.escape(value)}\s*;",
+            root,
+            re.I,
+        ), f"missing theme token {token}: {value}"
+    sidebar = re.search(r"--sidebar\s*:\s*(\d+)px\s*;", root)
+    assert sidebar, "missing --sidebar token"
+    assert 320 <= int(sidebar.group(1)) <= 360, "--sidebar must be 320-360px"
+    assert re.search(r"--max-width\s*:\s*1440px\s*;", root), (
+        "missing --max-width: 1440px"
+    )
+
+
+def test_front_responsive() -> None:
+    css = _css()
+    assert "box-sizing: border-box" in css
+    desktop = _css_block(css, "@media (min-width: 1024px)")
+    assert re.search(
+        r"grid-template-columns:\s*var\(--sidebar\)\s+minmax\(0,\s*1fr\)\s*;",
+        desktop,
+    ), "desktop layout must use sidebar + fluid main"
+    assert re.search(r"max-width:\s*var\(--max-width\)\s*;", desktop), (
+        "desktop layout must cap at --max-width"
+    )
+    tablet = _css_block(css, "@media (min-width: 768px) and (max-width: 1023px)")
+    assert re.search(
+        r"grid-template-columns:\s*minmax\(0,\s*1fr\)\s*;",
+        tablet,
+    ), "tablet layout must be single column"
+
+
+def test_front_reduced_motion_css() -> None:
+    reduced = _css_block(_css(), "@media (prefers-reduced-motion: reduce)")
+    assert "animation-duration: 0.01ms !important" in reduced
+    assert "animation-iteration-count: 1 !important" in reduced
+    assert "transition-duration: 0.01ms !important" in reduced
+    assert "scroll-behavior: auto !important" in reduced
+
+
+def test_front_no_build() -> None:
+    css = _css().lower()
+    assert "@import" not in css
+    assert "url(http" not in css
+    assert "//cdn" not in css
+    assert "@tailwind" not in css
+    assert "@apply" not in css

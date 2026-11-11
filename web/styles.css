@@ -1,1 +1,70 @@
-/* shell */
+/* T21: visual system only. Component styles arrive in T22/T23. */
+
+:root {
+  color-scheme: dark;
+  --bg: #0b1220;
+  --surface: #111a2b;
+  --surface-2: #18243a;
+  --border: #26364f;
+  --text: #e6edf7;
+  --text-muted: #9fb0c8;
+  --accent: #22d3ee;
+  --blue: #3b82f6;
+  --success: #22c55e;
+  --danger: #ef4444;
+  --warning: #f59e0b;
+  --sidebar: 340px;
+  --max-width: 1440px;
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  --radius: 12px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  background: var(--bg);
+}
+
+main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+}
+
+@media (min-width: 1024px) {
+  main {
+    grid-template-columns: var(--sidebar) minmax(0, 1fr);
+    max-width: var(--max-width);
+    margin-inline: auto;
+  }
+}
+
+@media (min-width: 768px) and (max-width: 1023px) {
+  main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
